@@ -238,9 +238,9 @@ function runSubtitle(run) {
 
 // Flatten repo results into ready-to-render rows for the popup list.
 // Row shapes:
-//   {kind:"header", repo, state, icon, color, url}
-//   {kind:"run",    icon, color, title, subtitle, url}
-//   {kind:"error",  repo, message}
+//   {kind:"repo", repo, state, icon, color, url}   (click: filter to this repo)
+//   {kind:"run",  repo, icon, color, title, subtitle, url}   (click: same filter)
+//   {kind:"error", repo, message}                  (click: same filter)
 function buildPopupRows(results) {
   var rows = []
   for (var i = 0; i < (results || []).length; i++) {
@@ -258,7 +258,7 @@ function buildPopupRows(results) {
     }
     var state = repoState(result.runs)
     rows.push({
-      kind: "header",
+      kind: "repo",
       repo: result.repo,
       state: state,
       icon: statusIcon(state),
@@ -270,6 +270,7 @@ function buildPopupRows(results) {
       var st = runState(run)
       rows.push({
         kind: "run",
+        repo: result.repo,
         icon: statusIcon(st),
         color: statusColor(st, "#cacccc"),
         title: runTitle(run),
@@ -434,21 +435,62 @@ function deriveState(raw) {
 
 // Popup rows for the notifications section (sits above the repo runs).
 // Row shapes:
-//   {kind:"header", repo:"Notifications (N)", state, icon, color, url}
+//   {kind:"notifications", repo, state, icon, color, url}
 //   {kind:"note",   icon, color, title, subtitle, url}
 function notificationRows(notifications, actionableCount) {
   var rows = []
   if (notifications.length === 0) return rows
   rows.push({
-    kind: "header",
+    kind: "notifications",
     repo: "Notifications (" + notifications.length + ")",
     state: actionableCount > 0 ? STATUS_ATTENTION : STATUS_NEUTRAL,
     icon: GLYPHS[STATUS_ATTENTION],
     color: actionableCount > 0 ? COLORS[STATUS_ATTENTION] : "",
-    url: githubNotificationsUrl()
+    url: ""
   })
   for (var i = 0; i < notifications.length; i++) {
     var note = notifications[i]
+    rows.push({
+      kind: "note",
+      icon: GLYPHS[STATUS_ATTENTION],
+      color: isActionable(note.reason) ? COLORS[STATUS_ATTENTION] : "#cacccc",
+      title: note.title || "Notification",
+      subtitle: notificationSubtitle(note),
+      url: note.html || githubNotificationsUrl()
+    })
+  }
+  return rows
+}
+
+// Filtered view shown when the user clicks a repo row: only that repository's
+// notifications — or a "No Notifications" row when it has none. The first row
+// doubles as an obvious "click to go back" affordance.
+// Row shapes:
+//   {kind:"selectedRepo", repo, icon, color, subtitle}
+//   {kind:"note",   icon, color, title, subtitle, url}
+//   {kind:"empty",  title, subtitle}
+function repoNotificationRows(repo, notifications) {
+  var rows = []
+  rows.push({
+    kind: "selectedRepo",
+    repo: repo,
+    icon: GLYPHS[STATUS_ATTENTION],
+    color: COLORS[STATUS_ATTENTION],
+    subtitle: "Click to close this view"
+  })
+  var notes = []
+  for (var i = 0; i < (notifications || []).length; i++)
+    if (notifications[i].repo === repo) notes.push(notifications[i])
+  if (notes.length === 0) {
+    rows.push({
+      kind: "empty",
+      title: "No Notifications",
+      subtitle: "Nothing unread for " + repo
+    })
+    return rows
+  }
+  for (var j = 0; j < notes.length; j++) {
+    var note = notes[j]
     rows.push({
       kind: "note",
       icon: GLYPHS[STATUS_ATTENTION],
@@ -489,6 +531,8 @@ if (typeof module !== "undefined" && module.exports) {
     githubNotificationsUrl: githubNotificationsUrl,
     notificationLabel: notificationLabel,
     notificationSubtitle: notificationSubtitle,
+    notificationRows: notificationRows,
+    repoNotificationRows: repoNotificationRows,
     unconfiguredMessage: unconfiguredMessage,
     STATUS_UNKNOWN: STATUS_UNKNOWN,
     STATUS_LOGIN: STATUS_LOGIN,

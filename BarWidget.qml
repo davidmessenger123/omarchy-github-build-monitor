@@ -39,7 +39,8 @@ BarWidget {
   property var repoResults: []          // [{repo, error?, runs?, runUrl?}]
   property string overall: Model.STATUS_UNKNOWN
   property string statusText: "Checking GitHub account…"
-  property var popupRows: []            // flattened [{kind, ...}] for the panel
+  property var derivedRows: []          // full popup list from the last fetch
+  property string selectedRepo: ""      // repo whose notifications are shown
   property string rateStatus: ""
   property string updatedLabel: ""
   property bool fetchBusy: false
@@ -50,6 +51,12 @@ BarWidget {
   property var notifications: []        // unread notifications from the account
   property int unreadCount: 0           // total unread notifications shown
   property int actionableCount: 0       // ...that need your review/response
+
+  // Clicking a repo row switches the list to that repo's notifications;
+  // click it again (or the "close this view" row) to see everything again.
+  readonly property var popupRows: root.selectedRepo === ""
+    ? root.derivedRows
+    : Model.repoNotificationRows(root.selectedRepo, root.notifications)
 
   readonly property bool highlighted: overall === "running" || overall === "pending" ||
     overall === "failure" || overall === "action-required" || overall === "error" ||
@@ -100,7 +107,7 @@ BarWidget {
     root.repoResults = state.results
     root.overall = state.overall
     root.statusText = state.statusText
-    root.popupRows = state.rows
+    root.derivedRows = state.rows
     root.rateStatus = state.rateStatus
     root.account = state.account
     root.repoCount = state.repoCount
@@ -300,6 +307,13 @@ BarWidget {
 
                   readonly property int typeHeight: modelData.kind === "run" ? Style.space(46) : Style.space(32)
 
+                  readonly property bool rowClickable: modelData.kind === "repo" ||
+                    modelData.kind === "run" || modelData.kind === "error" ||
+                    modelData.kind === "note" || modelData.kind === "selectedRepo"
+
+                  readonly property bool rowTitle: modelData.kind === "repo" ||
+                    modelData.kind === "selectedRepo" || modelData.kind === "notifications"
+
                   Item {
                     anchors.fill: parent
                     clip: true
@@ -315,9 +329,21 @@ BarWidget {
                     MouseArea {
                       id: rowMouse
                       anchors.fill: parent
-                      hoverEnabled: modelData.url !== ""
-                      cursorShape: modelData.url !== "" ? Qt.PointingHandCursor : Qt.ArrowCursor
-                      onClicked: if (modelData.url) root.shellOpen(modelData.url)
+                      hoverEnabled: row.rowClickable
+                      cursorShape: row.rowClickable ? Qt.PointingHandCursor : Qt.ArrowCursor
+                      onClicked: {
+                        // Only real notifications go to the browser. Clicking a
+                        // repo (its header, a run, or an error row) narrows the
+                        // list to that repo's notifications instead.
+                        if (modelData.kind === "note") {
+                          if (modelData.url) root.shellOpen(modelData.url)
+                        } else if (modelData.kind === "selectedRepo") {
+                          root.selectedRepo = ""
+                        } else if (modelData.kind === "repo" || modelData.kind === "run" || modelData.kind === "error") {
+                          var r = modelData.repo
+                          root.selectedRepo = r !== "" && root.selectedRepo === r ? "" : (r || "")
+                        }
+                      }
                     }
 
                     OpticalGlyph {
@@ -340,13 +366,13 @@ BarWidget {
 
                       Text {
                         width: parent.width
-                        text: modelData.kind === "header"
+                        text: row.rowTitle
                           ? modelData.repo
                           : (modelData.kind === "error" ? modelData.repo : modelData.title)
                         color: Color.popups.text
                         font.family: Style.font.family
                         font.pixelSize: modelData.kind === "run" ? Style.font.body : Style.font.bodySmall
-                        font.bold: modelData.kind === "header"
+                        font.bold: row.rowTitle
                         elide: Text.ElideRight
                       }
 
