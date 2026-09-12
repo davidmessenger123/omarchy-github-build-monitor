@@ -58,6 +58,29 @@ BarWidget {
     ? root.derivedRows
     : Model.repoNotificationRows(root.selectedRepo, root.notifications)
 
+  // The plain-G mark is drawn smaller than the solid bar glyphs at the same
+  // pixel size, so we measure its painted height against a reference glyph
+  // (the bell) and scale it up to optically match the other bar icons.
+  TextMetrics {
+    id: gRefMetrics
+    font.family: root.bar ? root.bar.fontFamily : Style.font.family
+    font.pixelSize: Style.bar.iconFont
+    text: "\uf0f3"
+  }
+  TextMetrics {
+    id: gGlyphMetrics
+    font.family: root.bar ? root.bar.fontFamily : Style.font.family
+    font.pixelSize: Style.bar.iconFont
+    text: "\uDB82\uDEF4"
+  }
+  readonly property real gScale: {
+    var ref = gRefMetrics.tightBoundingRect.height
+    var glyph = gGlyphMetrics.tightBoundingRect.height
+    return (ref > 0 && glyph > 0) ? ref / glyph : 1.3
+  }
+  readonly property bool showG: root.overall === "success" ||
+    root.overall === "neutral" || root.overall === "unknown"
+
   readonly property bool highlighted: overall === "running" || overall === "pending" ||
     overall === "failure" || overall === "action-required" || overall === "error" ||
     overall === Model.STATUS_LOGIN || overall === Model.STATUS_ATTENTION
@@ -207,6 +230,7 @@ BarWidget {
     activeColor: root.activeColor
     useActiveColor: root.highlighted
     slotSize: Style.bar.iconSlot
+    fontSize: root.showG ? Style.bar.iconFont * root.gScale : Style.bar.iconFont
     tooltipText: root.statusText
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.RightButton) root.refresh()
@@ -252,7 +276,7 @@ BarWidget {
             height: headerRow.height
             text: root.activeIcon
             fontFamily: root.bar ? root.bar.fontFamily : Style.font.resolvedFamily
-            fontSize: Style.font.icon
+            fontSize: root.showG ? Style.font.icon * root.gScale : Style.font.icon
             color: root.activeColor
           }
 
