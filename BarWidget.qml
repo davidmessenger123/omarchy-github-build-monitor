@@ -243,7 +243,7 @@ BarWidget {
 
           Column {
             id: headerText
-            width: parent.width - refreshButton.width - headerRow.spacing
+            width: parent.width - Style.space(22) - headerRow.spacing
             spacing: Style.space(2)
             Text {
               width: parent.width
@@ -263,15 +263,6 @@ BarWidget {
               wrapMode: Text.WrapAtWordBoundaryOrAnywhere
               visible: text !== ""
             }
-          }
-
-          Button {
-            id: refreshButton
-            text: "Refresh"
-            iconText: "\uf021"
-            fontSize: Style.font.caption
-            onClicked: root.refresh()
-            tooltipText: "Fetch now (right-click the bar icon also refreshes)"
           }
         }
 
@@ -389,9 +380,12 @@ BarWidget {
         Row {
           id: footerRow
           width: parent.width
+          spacing: Style.space(8)
           visible: !root.notLoggedIn
           Text {
-            width: parent.width / 2
+            // Take whatever width the two right-aligned buttons leave over, so
+            // they always sit inside the panel and never push past its edge.
+            width: Math.max(0, parent.width - dashboardButton.implicitWidth - refreshFooterButton.implicitWidth - footerRow.spacing * 2)
             text: root.rateStatus !== ""
               ? root.rateStatus
               : (root.account !== ""
@@ -401,15 +395,28 @@ BarWidget {
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
             elide: Text.ElideRight
+            verticalAlignment: Text.AlignVCenter
           }
           Button {
+            id: dashboardButton
             text: "Dashboard"
             fontSize: Style.font.caption
+            bordered: true
+            tooltipText: "Open the account's repositories in the browser"
             onClicked: {
               if (root.account !== "") root.shellOpen(Model.githubAccountReposUrl(root.account))
               else if (root.repoResults.length > 0 && root.repoResults[0].repoUrl)
                 root.shellOpen(root.repoResults[0].repoUrl)
             }
+          }
+          Button {
+            id: refreshFooterButton
+            text: "Refresh"
+            iconText: "\uf021"
+            fontSize: Style.font.caption
+            bordered: true
+            tooltipText: "Fetch now (right-click the bar icon also refreshes)"
+            onClicked: root.refresh()
           }
         }
       }
