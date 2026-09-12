@@ -56,7 +56,7 @@ BarWidget {
   // click it again (or the "close this view" row) to see everything again.
   readonly property var popupRows: root.selectedRepo === ""
     ? root.derivedRows
-    : Model.repoNotificationRows(root.selectedRepo, root.notifications)
+    : Model.repoNotificationRows(root.selectedRepo, root.notifications, root.repoResults)
 
   // The plain-G mark is drawn smaller than the solid bar glyphs at the same
   // pixel size, so we measure its painted height against a reference glyph

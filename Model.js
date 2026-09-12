@@ -239,14 +239,16 @@ function runSubtitle(run) {
 
 // Flatten repo results into ready-to-render rows for the popup list.
 // Repos with unread notifications carry a badge (bell + count). Notifications
-// whose repo is not in the watched list (threads on other people's repos you
-// follow, marketplace issues…) get a row of their own at the end so nothing
+// whose repo is not in the watched list (threads on other people's repos,
+// marketplace issues…) are attributed to a watched repo when their title
+// mentions it; otherwise they get a row of their own at the end so nothing
 // is orphaned.
 // Row shapes:
 //   {kind:"repo", repo, state, icon, color, url, notifCount, notifUrgent}
 //   {kind:"run",  repo, icon, color, title, subtitle, url}   (click: same filter)
 //   {kind:"error", repo, message}                 (click: same filter)
 function buildPopupRows(results, notifications) {
+  var attr = notificationAttribution(results, notifications)
   var rows = []
   var watched = {}
   for (var i = 0; i < (results || []).length; i++) {
@@ -265,7 +267,7 @@ function buildPopupRows(results, notifications) {
     }
     watched[result.repo] = true
     var state = repoState(result.runs)
-    var notes = notificationsForRepo(result.repo, notifications)
+    var badge = attr[result.repo]
     rows.push({
       kind: "repo",
       repo: result.repo,
@@ -273,8 +275,8 @@ function buildPopupRows(results, notifications) {
       icon: statusIcon(state),
       color: statusColor(state, "#cacccc"),
       url: result.repoUrl || githubActionsUrl(result.repo),
-      notifCount: notes.length,
-      notifUrgent: notes.length > 0 && repoActionableCount(notes) > 0
+      notifCount: badge ? badge.count : 0,
+      notifUrgent: badge ? badge.urgent : false
     })
     for (var j = 0; j < (result.runs || []).length; j++) {
       var run = result.runs[j]
@@ -291,25 +293,20 @@ function buildPopupRows(results, notifications) {
     }
   }
 
-  // Repos that appear only in notifications and are not otherwise watched.
-  var extraRepos = {}
-  for (var k = 0; k < (notifications || []).length; k++) {
-    var repo = notifications[k].repo
-    if (repo && !watched[repo]) extraRepos[repo] = true
-  }
-  for (var repoName in extraRepos) {
-    var extraNotes = notificationsForRepo(repoName, notifications)
-    var extraCount = repoActionableCount(extraNotes)
+  // Unattributed repos (not watched, no name match) each get their own row.
+  for (var extraName in attr) {
+    if (watched[extraName]) continue
+    var extra = attr[extraName]
     rows.push({
       kind: "repo",
-      repo: repoName,
+      repo: extraName,
       state: STATUS_NEUTRAL,
       icon: statusIcon(STATUS_NEUTRAL),
       color: "#cacccc",
-      url: githubRepoUrl(repoName),
-      notifCount: extraNotes.length,
-      notifUrgent: extraNotes.length > 0 && extraCount > 0,
-      subtitle: extraNotes.length + " notification" + (extraNotes.length > 1 ? "s" : "")
+      url: githubRepoUrl(extraName),
+      notifCount: extra.count,
+      notifUrgent: extra.urgent,
+      subtitle: extra.count + " notification" + (extra.count > 1 ? "s" : "")
     })
   }
   return rows
@@ -365,6 +362,88 @@ function repoActionableCount(notes) {
   for (var i = 0; i < notes.length; i++)
     if (isActionable(notes[i].reason)) count++
   return count
+}
+
+function isWordChar(c) {
+  return (c >= "a" && c <= "z") || (c >= "0" && c <= "9")
+}
+
+// Does `text` contain `word` as a standalone term (alphanumerics only, so
+// "scripture" matches inside "davidjm.scripture" but not "scripturenotes")?
+function containsWord(text, word) {
+  var s = String(text || "").toLowerCase()
+  var w = String(word || "").toLowerCase()
+  if (w === "") return false
+  var i = s.indexOf(w)
+  while (i !== -1) {
+    var before = i === 0 || !isWordChar(s.charAt(i - 1))
+    var after = i + w.length >= s.length || !isWordChar(s.charAt(i + w.length))
+    if (before && after) return true
+    i = s.indexOf(w, i + 1)
+  }
+  return false
+}
+
+// Work out which repo row each notification should be shown under. Notes on a
+// watched repo stay there. Notes on an unwatched repo (threads on other
+// people's repositories, marketplace issues…) are attributed to a watched
+// repo whose name appears in the notification title — e.g. the issue title
+// "[Verify]: davidjm.scripture" badges omarchy-scripture — so the user can
+// tell which of their repos the notification is about. Notes that match
+// nothing keep their real repo as a standalone row.
+function notificationAttribution(results, notifications) {
+  var watchedFull = {}
+  for (var i = 0; i < (results || []).length; i++) {
+    var name = String((results[i] || {}).repo || "")
+    if (name !== "") {
+      var tail = name
+      if (tail.indexOf("/") !== -1) tail = tail.slice(tail.lastIndexOf("/") + 1)
+      // Match by full repo tail ("omarchy-scripture") and, for Omarchy plugin
+      // repos, by the bare core name ("scripture") so titles that mention the
+      // plugin id ("[Verify]: davidjm.scripture") or just its name still land
+      // on the right row.
+      var tokens = { "": true }
+      if (tail.length > 9 && tail.slice(0, 8) === "omarchy-")
+        tokens[tail.slice(8)] = true
+      tokens[tail] = true
+      for (var t in tokens) if (t !== "") watchedFull[t] = name
+    }
+  }
+  var tokensList = []
+  for (var token in watchedFull) tokensList.push(token)
+  tokensList.sort(function(a, b) { return b.length - a.length })
+  function fullFor(token) { return watchedFull[token] || "" }
+  var buckets = {}
+  function take(repo) {
+    if (!buckets[repo]) buckets[repo] = { repo: repo, notes: [] }
+    return buckets[repo]
+  }
+  for (var n = 0; n < (notifications || []).length; n++) {
+    var note = notifications[n]
+    var repo = String(note.repo || "")
+    var target = watchedFull[repo] ? repo : ""
+    if (target === "") {
+      for (var j = 0; j < tokensList.length; j++) {
+        if (containsWord(note.title, tokensList[j])) {
+          target = fullFor(tokensList[j])
+          break
+        }
+      }
+    }
+    // A note whose repo is not watched (threads on other people's repos)
+    // keeps its real repo so it can never be lost, even with no title match.
+    if (target === "" && repo !== "") target = repo
+    if (target !== "") take(target).notes.push(note)
+  }
+  var out = {}
+  for (var key in buckets) {
+    var notes = buckets[key].notes
+    var urgent = false
+    for (var m = 0; m < notes.length; m++)
+      if (isActionable(notes[m].reason)) urgent = true
+    out[key] = { repo: key, count: notes.length, urgent: urgent, notes: notes }
+  }
+  return out
 }
 
 // Second, muted line for a notification row.
@@ -518,7 +597,7 @@ function notificationRows(notifications, actionableCount) {
 //   {kind:"selectedRepo", repo, icon, color, subtitle}
 //   {kind:"note",   icon, color, title, subtitle, url}
 //   {kind:"empty",  title, subtitle}
-function repoNotificationRows(repo, notifications) {
+function repoNotificationRows(repo, notifications, results) {
   var rows = []
   rows.push({
     kind: "selectedRepo",
@@ -527,7 +606,8 @@ function repoNotificationRows(repo, notifications) {
     color: COLORS[STATUS_ATTENTION],
     subtitle: "Click to close this view"
   })
-  var notes = notificationsForRepo(repo, notifications)
+  var bucket = notificationAttribution(results, notifications)[repo]
+  var notes = bucket ? bucket.notes : []
   if (notes.length === 0) {
     rows.push({
       kind: "empty",
@@ -580,6 +660,7 @@ if (typeof module !== "undefined" && module.exports) {
     notificationSubtitle: notificationSubtitle,
     notificationsForRepo: notificationsForRepo,
     repoActionableCount: repoActionableCount,
+    notificationAttribution: notificationAttribution,
     notificationRows: notificationRows,
     repoNotificationRows: repoNotificationRows,
     unconfiguredMessage: unconfiguredMessage,
