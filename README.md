@@ -12,14 +12,18 @@ state across all of those repositories:
 | --- | --- | --- | --- |
 | running | `circle-o-notch` | amber | A workflow is executing |
 | pending | `clock-o` | blue | A workflow is queued / waiting to start |
-| success | `check` | green | The newest run of each repo passed |
+| success | `G-circle` | green | The newest run of each repo passed |
 | failure | `times` | red | A repo's newest run failed or timed out |
 | action-required | `exclamation-circle` | amber | A workflow needs manual review |
 | cancelled | `ban` | foreground | Newest run was cancelled |
 | error | `exclamation-triangle` | orange | A repository could not be fetched |
-| neutral | `square-o` | foreground | No active pipelines, nothing alarming |
+| neutral | `G-circle` | foreground | No active pipelines, nothing alarming |
 | no account | `github` | amber | You aren't signed in — click to log in |
 | notification | `bell` | amber | Unread feedback needs your attention (see below) |
+
+The calm states — everything green, nothing running yet, or an unknown result —
+all show the widget's geometric-G badge (`G-circle`), so the pill reads as a
+GitHub mark while its color still tells you the health.
 
 Left-click opens a popup listing each repository's recent workflow runs
 (status, workflow name, branch, commit title, when it last ran, and a link to

@@ -13,19 +13,20 @@ var STATUS_UNKNOWN = "unknown"
 var STATUS_LOGIN = "login"
 var STATUS_ATTENTION = "attention"
 
-// Nerd Font (FA4 range, universally present) glyphs for each status.
+// Nerd Font glyphs for each status. The G-in-a-circle badge is the widget's
+// brand mark and covers the calm states (all green, nothing running, unknown).
 var GLYPHS = {
-  "running": "\uf110",          // nf-fa-circle_o_notch — active pipeline
-  "pending": "\uf017",          // nf-fa-clock_o — queued / scheduled
-  "success": "\uf00c",          // nf-fa-check — passed
-  "failure": "\uf00d",          // nf-fa-times — failed / timed out
-  "cancelled": "\uf05e",        // nf-fa-ban — cancelled
-  "action-required": "\uf06a",  // nf-fa-exclamation_circle
-  "neutral": "\uf0c8",          // nf-fa-square_o — nothing notable
-  "error": "\uf071",            // nf-fa-exclamation_triangle — fetch error
-  "unknown": "\uf0c8",
-  "login": "\uf09b",            // nf-fa-github — not signed in
-  "attention": "\uf0f3"         // nf-fa-bell — unread feedback waiting
+  "running": "\uf110",              // nf-fa-circle_o_notch — active pipeline
+  "pending": "\uf017",              // nf-fa-clock_o — queued / scheduled
+  "success": "\uDB82\uDFFE",        // nf-md-alpha_g_circle — geometric G
+  "failure": "\uf00d",              // nf-fa-times — failed / timed out
+  "cancelled": "\uf05e",            // nf-fa-ban — cancelled
+  "action-required": "\uf06a",      // nf-fa-exclamation_circle
+  "neutral": "\uDB82\uDFFE",        // nf-md-alpha_g_circle — geometric G
+  "error": "\uf071",                // nf-fa-exclamation_triangle — fetch error
+  "unknown": "\uDB82\uDFFE",
+  "login": "\uf09b",                // nf-fa-github — not signed in
+  "attention": "\uf0f3"             // nf-fa-bell — unread feedback waiting
 }
 
 // Soft, readable-on-dark status colors. Neutral slots resolve to the bar's
