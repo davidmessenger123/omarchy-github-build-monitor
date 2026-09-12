@@ -13,18 +13,18 @@ var STATUS_UNKNOWN = "unknown"
 var STATUS_LOGIN = "login"
 var STATUS_ATTENTION = "attention"
 
-// Nerd Font glyphs for each status. The G-in-a-circle badge is the widget's
+// Nerd Font glyphs for each status. A plain geometric G is the widget's
 // brand mark and covers the calm states (all green, nothing running, unknown).
 var GLYPHS = {
   "running": "\uf110",              // nf-fa-circle_o_notch — active pipeline
   "pending": "\uf017",              // nf-fa-clock_o — queued / scheduled
-  "success": "\uDB82\uDFFE",        // nf-md-alpha_g_circle — geometric G
+  "success": "\uDB82\uDEF4",        // nf-md-alpha_g — plain geometric G
   "failure": "\uf00d",              // nf-fa-times — failed / timed out
   "cancelled": "\uf05e",            // nf-fa-ban — cancelled
   "action-required": "\uf06a",      // nf-fa-exclamation_circle
-  "neutral": "\uDB82\uDFFE",        // nf-md-alpha_g_circle — geometric G
+  "neutral": "\uDB82\uDEF4",        // nf-md-alpha_g — plain geometric G
   "error": "\uf071",                // nf-fa-exclamation_triangle — fetch error
-  "unknown": "\uDB82\uDFFE",
+  "unknown": "\uDB82\uDEF4",
   "login": "\uf09b",                // nf-fa-github — not signed in
   "attention": "\uf0f3"             // nf-fa-bell — unread feedback waiting
 }
