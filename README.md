@@ -78,6 +78,17 @@ omarchy plugin enable davidjm.github-build-monitor
 Bar plugins land in the section from their manifest (`right`) and can be moved
 with `omarchy bar move`.
 
+## Remove
+
+```bash
+omarchy plugin remove davidjm.github-build-monitor
+```
+
+The plugin keeps no state of its own: everything it reads comes from GitHub on
+each poll, and its settings (if any) live only in the entry you put in
+`~/.config/omarchy/shell.json`, which `omarchy plugin remove` leaves untouched
+so a reinstall keeps your configuration.
+
 ## Configure
 
 Nothing is required — add the entry and it starts monitoring the logged-in
