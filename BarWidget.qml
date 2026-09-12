@@ -30,13 +30,9 @@ BarWidget {
 
   // ---- configuration ------------------------------------------------------
 
-  // Optional extra repositories to watch in addition to the account's own.
-  readonly property var extraRepos: Model.parseRepos(setting("repos", ""))
-  readonly property int maxRepos: Model.clampInt(setting("maxRepos", 30), 1, 100)
-  readonly property string apiHost: setting("host", "")
-  readonly property string githubToken: setting("token", "")
-  readonly property int perPage: Model.clampInt(setting("perPage", 6), 1, 30)
-  readonly property int pollIntervalMs: Model.clampInt(setting("interval", 60), 15, 3600) * 1000
+  // Settings are read fresh on every refresh (see refresh/onSettingsChanged)
+  // because the shell updates this widget's `settings` in place when
+  // shell.json changes; properties bound once at construction would go stale.
 
   // ---- state --------------------------------------------------------------
 
@@ -67,19 +63,27 @@ BarWidget {
   function refresh() {
     if (root.fetchBusy) return
 
+    // Re-read every setting fresh: shell.json can be edited at any time and
+    // the host only updates this widget's `settings` in place.
+    var repos = Model.parseRepos(setting("repos", ""))
+    var maxRepos = Model.clampInt(setting("maxRepos", 30), 1, 100)
+    var apiHost = setting("host", "")
+    var githubToken = setting("token", "")
+    var perPage = Model.clampInt(setting("perPage", 6), 1, 30)
+
     // Account mode by default: the helper resolves the logged-in GitHub
     // account itself (gh CLI, GITHUB_TOKEN, or the `token` setting) and
     // monitors that account's repositories. Extra --repo flags add repos
     // that don't belong to the account (organization-owned, a coworker's…).
     var command = ["python3",
       Model.scriptPath(Qt.resolvedUrl("github-builds.py")),
-      "--per-page", String(root.perPage),
-      "--max-repos", String(root.maxRepos),
+      "--per-page", String(perPage),
+      "--max-repos", String(maxRepos),
       "--timeout", "12"]
-    if (root.apiHost !== "") { command.push("--host"); command.push(root.apiHost) }
-    if (root.githubToken !== "") { command.push("--token"); command.push(root.githubToken) }
-    for (var i = 0; i < root.extraRepos.length; i++) {
-      command.push("--repo"); command.push(root.extraRepos[i])
+    if (apiHost !== "") { command.push("--host"); command.push(apiHost) }
+    if (githubToken !== "") { command.push("--token"); command.push(githubToken) }
+    for (var i = 0; i < repos.length; i++) {
+      command.push("--repo"); command.push(repos[i])
     }
 
     fetcher.command = command
@@ -102,7 +106,10 @@ BarWidget {
     root.updatedLabel = "Updated " + Model.clockTime(new Date())
   }
 
-  onSettingsChanged: Qt.callLater(root.refresh)
+  onSettingsChanged: function() {
+    pollTimer.interval = Model.clampInt(setting("interval", 60), 15, 3600) * 1000
+    Qt.callLater(root.refresh)
+  }
 
   Process {
     id: fetcher
@@ -120,7 +127,7 @@ BarWidget {
 
   Timer {
     id: pollTimer
-    interval: root.pollIntervalMs
+    interval: Model.clampInt(setting("interval", 60), 15, 3600) * 1000
     running: true
     repeat: true
     triggeredOnStart: true
