@@ -35,11 +35,12 @@ repositories dashboard.
 The monitor also watches your unread GitHub notifications. When one of them
 needs something from you specifically — a review requested on a PR you pushed,
 a mention, a reply on a thread you started, or a new assignment — the pill flips
-to a bell and reads "N notifications waiting". Middle-click jumps
-straight to your notifications inbox; the popup lists the feedback (reason,
-repository, when it happened) above the workflow runs. Other push-relevant
-events (CI activity, security alerts, subscriptions) stay in the popup without
-flipping the pill.
+to a bell and reads "N notifications waiting". Each affected repo row in the
+popup carries a bell badge with its unread count (amber when it needs action,
+grey otherwise). Clicking the repo reveals its notifications, and clicking one
+of those opens the page in your browser. Middle-click on the pill jumps straight
+to your notifications inbox. Other push-relevant events (CI activity, security
+alerts, subscriptions) stay behind the badge without flipping the pill.
 
 ## Requirements
 
