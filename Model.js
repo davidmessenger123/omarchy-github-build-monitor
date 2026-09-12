@@ -387,15 +387,19 @@ function containsWord(text, word) {
 // Work out which repo row each notification should be shown under. Notes on a
 // watched repo stay there. Notes on an unwatched repo (threads on other
 // people's repositories, marketplace issues…) are attributed to a watched
-// repo whose name appears in the notification title — e.g. the issue title
-// "[Verify]: davidjm.scripture" badges omarchy-scripture — so the user can
-// tell which of their repos the notification is about. Notes that match
-// nothing keep their real repo as a standalone row.
+// repo whose name appears in the notification title or body text — e.g. the
+// issue title "[Verify]: davidjm.scripture" badges omarchy-scripture, and a
+// marketplace submission whose body links
+// davidmessenger123/omarchy-github-build-monitor badges that repo — so the
+// user can tell which of their repos the notification is about. Notes that
+// match nothing keep their real repo as a standalone row.
 function notificationAttribution(results, notifications) {
   var watchedFull = {}
+  var watchedRepos = []
   for (var i = 0; i < (results || []).length; i++) {
     var name = String((results[i] || {}).repo || "")
     if (name !== "") {
+      watchedRepos.push(name)
       var tail = name
       if (tail.indexOf("/") !== -1) tail = tail.slice(tail.lastIndexOf("/") + 1)
       // Match by full repo tail ("omarchy-scripture") and, for Omarchy plugin
@@ -428,6 +432,18 @@ function notificationAttribution(results, notifications) {
           target = fullFor(tokensList[j])
           break
         }
+      }
+    }
+    // Thread text often names the repo it is about (marketplace bodies carry
+    // the repository URL). Match the exact owner/repo path there.
+    if (target === "") {
+      var hay = String(note.body || "")
+      if (hay !== "") {
+        for (var b = 0; b < watchedRepos.length; b++)
+          if (hay.indexOf(watchedRepos[b]) !== -1) {
+            target = watchedRepos[b]
+            break
+          }
       }
     }
     // A note whose repo is not watched (threads on other people's repos)

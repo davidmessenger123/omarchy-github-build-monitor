@@ -43,6 +43,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 DEFAULT_TIMEOUT = 12
 MAX_WORKERS = 8
+MAX_BODY_NOTES = 10
 API_VERSION = "2022-11-28"
 USER_AGENT = "github-build-monitor/1.0"
 
@@ -61,6 +62,13 @@ def build_headers(token):
 def http_json(host, path, token, timeout):
     """GET host+path as (json body, response). Raises HTTPError on failure."""
     url = "https://{0}{1}".format(host, path)
+    request = urllib.request.Request(url, headers=build_headers(token))
+    response = urllib.request.urlopen(request, timeout=timeout)
+    return json.load(response), response
+
+
+def http_absolute(url, token, timeout):
+    """GET an absolute API URL as (json body, response)."""
     request = urllib.request.Request(url, headers=build_headers(token))
     response = urllib.request.urlopen(request, timeout=timeout)
     return json.load(response), response
@@ -149,7 +157,7 @@ def fetch_notifications(args, host):
         reason = getattr(error, "reason", None)
         return [], "network error: {0}".format(reason or error)
 
-    for note in body:
+    for index, note in enumerate(body):
         if not note.get("unread"):
             continue
         subject = note.get("subject") or {}
@@ -159,9 +167,44 @@ def fetch_notifications(args, host):
             "type": subject.get("type") or "Notification",
             "repo": (note.get("repository") or {}).get("full_name", ""),
             "html": notification_html(host, note),
+            "body": notification_body(args, host, note) if index < MAX_BODY_NOTES else "",
             "updated_at": note.get("updated_at") or "",
         })
     return notifications, ""
+
+
+def notification_body(args, host, note):
+    """Subject text behind a notification, clipped to keep the popup light.
+
+    Thread titles alone often do not say which repository a cross-repo note is
+    about (marketplace issues mention the repo in the body). Fetch the tracked
+    issue's/PR's body — or its latest comment when that is empty — so the
+    widget can attribute the note to the watched repo whose full name appears
+    in the text. Bounded to one short request per unread note."""
+    subject = note.get("subject") or {}
+    candidates = [subject.get("url") or ""]
+    if subject.get("latest_comment_url"):
+        candidates.append(subject.get("latest_comment_url"))
+    for url in candidates:
+        url = _absolute_url(url)
+        if not url:
+            continue
+        try:
+            payload, _ = http_absolute(url, args.token, min(args.timeout, 8))
+        except Exception:
+            continue
+        text = payload.get("body")
+        if isinstance(text, str) and text.strip():
+            return text[:2000]
+    return ""
+
+
+def _absolute_url(url):
+    # API subject urls arrive absolute; keep only the api host form.
+    url = str(url or "").strip()
+    if url.startswith("http://") or url.startswith("https://"):
+        return url
+    return ""
 
 
 def fetch_repo(args, host, repo):
