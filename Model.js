@@ -238,17 +238,22 @@ function runSubtitle(run) {
 }
 
 // Flatten repo results into ready-to-render rows for the popup list.
-// Repos with unread notifications carry a badge (bell + count).
+// Repos with unread notifications carry a badge (bell + count). Notifications
+// whose repo is not in the watched list (threads on other people's repos you
+// follow, marketplace issues…) get a row of their own at the end so nothing
+// is orphaned.
 // Row shapes:
 //   {kind:"repo", repo, state, icon, color, url, notifCount, notifUrgent}
 //   {kind:"run",  repo, icon, color, title, subtitle, url}   (click: same filter)
 //   {kind:"error", repo, message}                 (click: same filter)
 function buildPopupRows(results, notifications) {
   var rows = []
+  var watched = {}
   for (var i = 0; i < (results || []).length; i++) {
     var result = results[i]
     if (!result) continue
     if (result.error) {
+      watched[result.repo] = true
       rows.push({
         kind: "error",
         repo: result.repo,
@@ -258,6 +263,7 @@ function buildPopupRows(results, notifications) {
       })
       continue
     }
+    watched[result.repo] = true
     var state = repoState(result.runs)
     var notes = notificationsForRepo(result.repo, notifications)
     rows.push({
@@ -283,6 +289,28 @@ function buildPopupRows(results, notifications) {
         url: run.html_url || ""
       })
     }
+  }
+
+  // Repos that appear only in notifications and are not otherwise watched.
+  var extraRepos = {}
+  for (var k = 0; k < (notifications || []).length; k++) {
+    var repo = notifications[k].repo
+    if (repo && !watched[repo]) extraRepos[repo] = true
+  }
+  for (var repoName in extraRepos) {
+    var extraNotes = notificationsForRepo(repoName, notifications)
+    var extraCount = repoActionableCount(extraNotes)
+    rows.push({
+      kind: "repo",
+      repo: repoName,
+      state: STATUS_NEUTRAL,
+      icon: statusIcon(STATUS_NEUTRAL),
+      color: "#cacccc",
+      url: githubRepoUrl(repoName),
+      notifCount: extraNotes.length,
+      notifUrgent: extraNotes.length > 0 && extraCount > 0,
+      subtitle: extraNotes.length + " notification" + (extraNotes.length > 1 ? "s" : "")
+    })
   }
   return rows
 }
