@@ -33,19 +33,52 @@ The gh CLI is used only as the credential store when no token is given.
 
 import argparse
 import json
+import math
 import os
+import pwd
 import shutil
+import signal
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 DEFAULT_TIMEOUT = 12
 MAX_WORKERS = 8
 MAX_BODY_NOTES = 10
+CHUNK_BYTES = 65536
+MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+MAX_SUBJECT_BYTES = 512 * 1024
 API_VERSION = "2022-11-28"
-USER_AGENT = "github-build-monitor/1.0"
+USER_AGENT = "github-notify-center/1.0"
+
+
+# Deterministic runtime: the widget launches this helper with a cleared
+# environment, so the process must rebuild the few variables it needs itself.
+def prepare_environment():
+    if not os.environ.get("HOME"):
+        try:
+            os.environ["HOME"] = pwd.getpwuid(os.getuid()).pw_dir
+        except Exception:
+            pass
+    home = os.environ.get("HOME") or ""
+    per_user = []
+    if home:
+        per_user = [
+            os.path.join(home, ".local", "bin"),
+            os.path.join(home, ".local", "share", "mise", "shims"),
+            os.path.join(home, ".cargo", "bin"),
+        ]
+    parts = ["/usr/local/bin", "/usr/bin", "/bin"] + per_user
+    seen = set()
+    ordered = []
+    for part in parts:
+        if part and part not in seen:
+            seen.add(part)
+            ordered.append(part)
+    os.environ["PATH"] = ":".join(ordered)
 
 
 def build_headers(token):
@@ -59,19 +92,54 @@ def build_headers(token):
     return headers
 
 
-def http_json(host, path, token, timeout):
-    """GET host+path as (json body, response). Raises HTTPError on failure."""
-    url = "https://{0}{1}".format(host, path)
-    request = urllib.request.Request(url, headers=build_headers(token))
-    response = urllib.request.urlopen(request, timeout=timeout)
-    return json.load(response), response
+def _read_capped(response, max_bytes):
+    """Read a response incrementally, refusing to buffer beyond max_bytes."""
+    chunks = []
+    size = 0
+    while True:
+        chunk = response.read(CHUNK_BYTES)
+        if not chunk:
+            break
+        size += len(chunk)
+        if size > max_bytes:
+            raise urllib.error.URLError(
+                "response exceeded {0} bytes".format(max_bytes))
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
-def http_absolute(url, token, timeout):
-    """GET an absolute API URL as (json body, response)."""
-    request = urllib.request.Request(url, headers=build_headers(token))
+def _json(url, headers, timeout, max_bytes):
+    request = urllib.request.Request(url, headers=headers)
     response = urllib.request.urlopen(request, timeout=timeout)
-    return json.load(response), response
+    try:
+        raw = _read_capped(response, max_bytes)
+        body = json.loads(raw)
+    finally:
+        response.close()
+    return body, response
+
+
+def http_json(host, path, token, timeout, max_bytes=MAX_RESPONSE_BYTES):
+    """GET host+path as (json body, response). Raises HTTPError on failure.
+    Path is always built from the configured API origin, never from input."""
+    return _json("https://{0}{1}".format(host, path),
+                 build_headers(token), timeout, max_bytes)
+
+
+def http_absolute(url, token, timeout, max_bytes=MAX_SUBJECT_BYTES,
+                  allowed_host=None):
+    """GET an absolute API URL as (json body, response).
+
+    Credentials are only ever attached to the configured API origin: anything
+    without an https scheme or whose host differs from `allowed_host` is
+    refused, so a hostile subject URL can never receive the Bearer token."""
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme != "https":
+        raise ValueError("refusing non-https URL")
+    if allowed_host is not None and parts.netloc != allowed_host:
+        raise ValueError(
+            "refusing URL outside API origin {0}".format(allowed_host))
+    return _json(url, build_headers(token), timeout, max_bytes)
 
 
 def http_error_message(error):
@@ -190,7 +258,8 @@ def notification_body(args, host, note):
         if not url:
             continue
         try:
-            payload, _ = http_absolute(url, args.token, min(args.timeout, 8))
+            payload, _ = http_absolute(url, args.token, min(args.timeout, 8),
+                                       allowed_host=host)
         except Exception:
             continue
         text = payload.get("body")
@@ -200,9 +269,9 @@ def notification_body(args, host, note):
 
 
 def _absolute_url(url):
-    # API subject urls arrive absolute; keep only the api host form.
+    # API subject urls arrive absolute; keep only the https form.
     url = str(url or "").strip()
-    if url.startswith("http://") or url.startswith("https://"):
+    if url.startswith("https://"):
         return url
     return ""
 
@@ -222,7 +291,7 @@ def fetch_repo(args, host, repo):
 
     return {
         "repo": repo,
-        "runs": body.get("workflow_runs") or [],
+        "runs": (body.get("workflow_runs") or [])[: args.per_page],
         "runUrl": "https://{0}{1}".format(host, path),
         "repoUrl": "https://{0}/{1}/actions".format(web_base(host), repo),
         "rate": {
@@ -233,6 +302,7 @@ def fetch_repo(args, host, repo):
 
 
 def main():
+    prepare_environment()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", action="append", default=[],
                         help="extra owner/name to monitor alongside the account (repeatable)")
@@ -249,6 +319,14 @@ def main():
         args.per_page = 1
     if args.max_repos < 1:
         args.max_repos = 1
+
+    # Whole-process deadline, independent of any single request timeout: even
+    # if every HTTP call hung forever (or the concurrent pool wedged), the
+    # helper cannot outlive this bound. The widget keeps its own watchdog too.
+    waves = max(1, math.ceil(args.max_repos / MAX_WORKERS))
+    deadline = max(30, args.timeout * (waves + 4))
+    signal.signal(signal.SIGALRM, lambda signum, frame: _expire())
+    signal.alarm(int(deadline))
 
     host = (args.host or "api.github.com").rstrip("/")
     gh_available = shutil.which("gh") is not None
@@ -315,6 +393,10 @@ def main():
 
     sys.stdout.write(json.dumps({"__meta": meta}, separators=(",", ":")) + "\n")
     sys.stdout.flush()
+
+
+def _expire():
+    raise SystemExit("poll deadline exceeded")
 
 
 if __name__ == "__main__":

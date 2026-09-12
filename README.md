@@ -142,15 +142,41 @@ it for the shell process:
 GITHUB_TOKEN=ghp_xxx omarchy restart shell
 ```
 
-The token is stored in plain text in `~/.config/omarchy/shell.json` if you put
-it there, and is passed as an argument to a short-lived Python process. Prefer
-the `gh` login or the environment variable if you share the config file.
+If you put it in the `token` setting it is stored in plain text in
+`~/.config/omarchy/shell.json`. Either way the widget hands it to the helper
+as an **environment variable** (`GITHUB_TOKEN`) on a cleared child environment
+— never on the process command line, so it is not readable from `ps`. Prefer
+the `gh` login if you share the config file.
+
+## Security
+
+The helper is designed to stay free of common credential-exposure and
+resource-bound traps:
+
+- The widget launches it as `/usr/bin/python3 -E` with a **cleared
+  environment**, so nothing (PATH hijacks, inherited variables) bleeds into
+  the child; the interpreter itself is an absolute path.
+- Any configured token is delivered via the `GITHUB_TOKEN` **environment
+  variable**, never through argv.
+- Credentials are attached **only to the configured API origin**
+  (`api.github.com` by default, or your `host` setting). When the helper
+  follows a notification's `subject.url` to read thread text, the URL must be
+  `https` on exactly that host or it is refused — a hostile URL can never
+  receive the Bearer token.
+- Every response is read **incrementally and capped** (4 MiB default, 512 KiB
+  for subject bodies), and arrays are sliced to the requested page sizes, so
+  a malformed or hostile payload cannot balloon memory.
+- There is a **whole-process deadline**: the helper arms a SIGALRM wall clock
+  and the shell process keeps an independent watchdog that stops the child and
+  surfaces a timeout instead of hanging the recurring poll.
+
+This is a best-effort hardening, not an audit.
 
 ## How it works
 
 On each tick the widget runs the bundled `github-builds.py` (Python stdlib
-only). It resolves the logged-in account (`--token`, then `GITHUB_TOKEN`, then
-`gh auth token`), lists the account's owned repositories newest-updated first,
+only). It resolves the logged-in account (`GITHUB_TOKEN`, then `gh auth
+token`), lists the account's owned repositories newest-updated first,
 and fetches each repo's
 [`GET /repos/{owner}/{repo}/actions/runs`](https://docs.github.com/en/rest/actions/workflow-runs)
 in parallel. Each repository's response is printed as one JSON line, so a

@@ -113,23 +113,56 @@ BarWidget {
     // account itself (gh CLI, GITHUB_TOKEN, or the `token` setting) and
     // monitors that account's repositories. Extra --repo flags add repos
     // that don't belong to the account (organization-owned, a coworker's…).
-    var command = ["python3",
+    //
+    // Security: the interpreter is an absolute path and the child runs with a
+    // cleared environment so nothing from the shell process bleeds in. The
+    // token (if configured) is injected as the GITHUB_TOKEN environment
+    // variable — never on the process argv, where it would be visible to
+    // every local user in `ps`.
+    var command = ["/usr/bin/python3", "-E",
       Model.scriptPath(Qt.resolvedUrl("github-builds.py")),
       "--per-page", String(perPage),
       "--max-repos", String(maxRepos),
       "--timeout", "12"]
     if (apiHost !== "") { command.push("--host"); command.push(apiHost) }
-    if (githubToken !== "") { command.push("--token"); command.push(githubToken) }
     for (var i = 0; i < repos.length; i++) {
       command.push("--repo"); command.push(repos[i])
     }
 
+    fetcher.clearEnvironment = true
+    fetcher.environment = githubToken !== "" ? { "GITHUB_TOKEN": githubToken } : {}
     fetcher.command = command
     root.fetchBusy = true
     fetcher.running = true
+
+    // Independent watchdog: this shell process is the final authority on how
+    // long a poll may run. If the helper outlives its deadline it is stopped
+    // and the pill flips to an error instead of hanging the recurring timer.
+    watchdog.interval = root.pollDeadlineMs(maxRepos)
+    watchdog.start()
+  }
+
+  // Mirror of the helper's own SIGALRM deadline (timeout 12s, 8 workers).
+  function pollDeadlineMs(maxRepos) {
+    var waves = Math.max(1, Math.ceil(maxRepos / 8))
+    return Math.max(30, 12 * (waves + 4)) * 1000
+  }
+
+  Timer {
+    id: watchdog
+    interval: 60000
+    repeat: false
+    onTriggered: {
+      if (!root.fetchBusy) return
+      root.fetchBusy = false
+      fetcher.running = false
+      root.overall = "error"
+      root.statusText = "Poll timed out — the shell aborted the fetch"
+    }
   }
 
   function ingest(raw) {
+    watchdog.stop()
     root.fetchBusy = false
     var state = Model.deriveState(raw)
     root.repoResults = state.results
@@ -212,7 +245,7 @@ BarWidget {
     } else {
       Quickshell.execDetached(["omarchy-notification-send",
         "GitHub Notify Center",
-        "The gh CLI is missing. Install it (sudo pacman -S github-cli), sign in, and the monitor will start tracking your account."])
+        "The gh CLI is missing. Install the github-cli package and sign in, and the monitor will start tracking your account."])
     }
   }
 
