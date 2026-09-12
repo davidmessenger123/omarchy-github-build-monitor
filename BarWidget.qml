@@ -376,16 +376,21 @@ BarWidget {
           }
         }
 
-        // Footer with rate-limit status and account dashboard shortcut.
-        Row {
+        // Footer with rate-limit status, dashboard and refresh. All three are
+        // vertically centered on the same line; the buttons are anchored to
+        // the right edge and the status text takes exactly the leftover width,
+        // so nothing can push them outside the panel.
+        Item {
           id: footerRow
           width: parent.width
-          spacing: Style.space(8)
+          height: refreshFooterButton.implicitHeight
           visible: !root.notLoggedIn
+
           Text {
-            // Take whatever width the two right-aligned buttons leave over, so
-            // they always sit inside the panel and never push past its edge.
-            width: Math.max(0, parent.width - dashboardButton.implicitWidth - refreshFooterButton.implicitWidth - footerRow.spacing * 2)
+            id: footerText
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            width: parent.width - dashboardButton.implicitWidth - refreshFooterButton.implicitWidth - Style.space(16)
             text: root.rateStatus !== ""
               ? root.rateStatus
               : (root.account !== ""
@@ -394,11 +399,29 @@ BarWidget {
             color: Color.muted
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
-            elide: Text.ElideRight
             verticalAlignment: Text.AlignVCenter
+            elide: Text.ElideRight
+            maximumLineCount: 1
           }
+
+          Button {
+            id: refreshFooterButton
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            text: "Refresh"
+            iconText: "\uf021"
+            iconSize: Style.font.caption
+            fontSize: Style.font.caption
+            bordered: true
+            tooltipText: "Fetch now (right-click the bar icon also refreshes)"
+            onClicked: root.refresh()
+          }
+
           Button {
             id: dashboardButton
+            anchors.right: refreshFooterButton.left
+            anchors.rightMargin: Style.space(8)
+            anchors.verticalCenter: parent.verticalCenter
             text: "Dashboard"
             fontSize: Style.font.caption
             bordered: true
@@ -408,15 +431,6 @@ BarWidget {
               else if (root.repoResults.length > 0 && root.repoResults[0].repoUrl)
                 root.shellOpen(root.repoResults[0].repoUrl)
             }
-          }
-          Button {
-            id: refreshFooterButton
-            text: "Refresh"
-            iconText: "\uf021"
-            fontSize: Style.font.caption
-            bordered: true
-            tooltipText: "Fetch now (right-click the bar icon also refreshes)"
-            onClicked: root.refresh()
           }
         }
       }
@@ -439,7 +453,7 @@ BarWidget {
 
   readonly property real popupImplicitHeight: {
     var header = Style.space(34)
-    var footer = root.notLoggedIn ? Style.space(6) : Style.space(30)
+    var footer = root.notLoggedIn ? Style.space(6) : Style.space(36)
     var gaps = Style.space(6) * 3
     return header + root.popupRowsHeight + footer + gaps
   }
