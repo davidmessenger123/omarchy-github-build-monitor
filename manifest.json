@@ -1,0 +1,63 @@
+{
+  "$schema": "https://raw.githubusercontent.com/omarchy/omarchy/main/schemas/plugin.json",
+  "schemaVersion": 1,
+  "id": "davidjm.github-build-monitor",
+  "name": "GitHub Build Monitor",
+  "version": "1.0.0",
+  "author": "David JM",
+  "license": "MIT",
+  "repository": "https://github.com/davidmessenger123/omarchy-github-build-monitor",
+  "description": "Real-time GitHub Actions status for your repositories, shown in the Omarchy bar.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "GitHub Build Monitor",
+    "description": "Shows the state of the most recent GitHub Actions workflow runs for your repositories and opens a detailed list.",
+    "category": "Info",
+    "defaultSection": "right",
+    "allowMultiple": false,
+    "defaults": {
+      "repos": "",
+      "token": "",
+      "host": "",
+      "interval": 60,
+      "perPage": 6
+    },
+    "schema": [
+      {
+        "key": "repos",
+        "type": "string",
+        "label": "Repositories",
+        "description": "Comma-separated owner/name pairs, e.g. HANCORE-linux/Shibumi-Shell, cli/cli"
+      },
+      {
+        "key": "token",
+        "type": "string",
+        "label": "GitHub token",
+        "description": "Optional personal access token (also read from the GITHUB_TOKEN environment variable). Raises the API rate limit to 5000 req/h."
+      },
+      {
+        "key": "host",
+        "type": "string",
+        "label": "API host",
+        "description": "Leave empty for github.com. Set for GitHub Enterprise (e.g. github.example.com)."
+      },
+      {
+        "key": "interval",
+        "type": "integer",
+        "label": "Poll interval (seconds)",
+        "defaultValue": 60
+      },
+      {
+        "key": "perPage",
+        "type": "integer",
+        "label": "Runs per repository",
+        "defaultValue": 6
+      }
+    ]
+  }
+}
