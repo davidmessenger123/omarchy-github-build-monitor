@@ -211,7 +211,7 @@ BarWidget {
       Quickshell.execDetached(["omarchy-launch-terminal", "gh", "auth", "login"])
     } else {
       Quickshell.execDetached(["omarchy-notification-send",
-        "GitHub Build Monitor",
+        "GitHub Notify Center",
         "The gh CLI is missing. Install it (sudo pacman -S github-cli), sign in, and the monitor will start tracking your account."])
     }
   }

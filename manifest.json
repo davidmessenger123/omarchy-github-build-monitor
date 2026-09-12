@@ -2,7 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/omarchy/omarchy/main/schemas/plugin.json",
   "schemaVersion": 1,
   "id": "davidjm.github-build-monitor",
-  "name": "GitHub Build Monitor",
+  "name": "GitHub Notify Center",
   "version": "1.0.0",
   "author": "David JM",
   "license": "MIT",
@@ -15,7 +15,7 @@
     "barWidget": "BarWidget.qml"
   },
   "barWidget": {
-    "displayName": "GitHub Build Monitor",
+    "displayName": "GitHub Notify Center",
     "description": "Monitors every repository owned by the GitHub account that is currently logged in (gh CLI or GITHUB_TOKEN). A pill in the bar reflects the newest Actions state across those repos and opens a detailed run list. If no account is signed in the pill asks to log in and launches `gh auth login` in a terminal.",
     "category": "Info",
     "defaultSection": "right",

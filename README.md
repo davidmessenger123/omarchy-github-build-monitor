@@ -1,4 +1,4 @@
-# GitHub Build Monitor
+# GitHub Notify Center
 
 A real-time status indicator for the [Omarchy](https://omarchy.org/) shell bar
 that watches the GitHub Actions CI/CD pipelines of **every repository owned by
