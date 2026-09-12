@@ -78,6 +78,11 @@ BarWidget {
     var glyph = gGlyphMetrics.tightBoundingRect.height
     return (ref > 0 && glyph > 0) ? ref / glyph : 1.3
   }
+  // The letter G concentrates its ink in the upper half, so on top of the
+  // height ratio it needs a little extra size and a nudge downward to sit at
+  // the same optical height as the solid bar glyphs.
+  readonly property real gExtra: 1.08
+  readonly property real gDrop: Math.round(Style.bar.iconFont * 0.05)
   readonly property bool showG: root.overall === "success" ||
     root.overall === "neutral" || root.overall === "unknown"
 
@@ -230,7 +235,10 @@ BarWidget {
     activeColor: root.activeColor
     useActiveColor: root.highlighted
     slotSize: Style.bar.iconSlot
-    fontSize: root.showG ? Style.bar.iconFont * root.gScale : Style.bar.iconFont
+    // The G is rendered by a custom icon so we can size it up and bias it
+    // downward; every other state uses the plain text glyph at bar size.
+    iconComponent: root.showG ? gPillIcon : null
+    fontSize: Style.bar.iconFont
     tooltipText: root.statusText
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.RightButton) root.refresh()
@@ -338,6 +346,9 @@ BarWidget {
                   readonly property bool rowTitle: modelData.kind === "repo" ||
                     modelData.kind === "selectedRepo" || modelData.kind === "notifications"
 
+                  readonly property bool rowBadge: modelData.kind === "repo" &&
+                    modelData.notifCount > 0
+
                   Item {
                     anchors.fill: parent
                     clip: true
@@ -385,6 +396,7 @@ BarWidget {
                       anchors.left: parent.left
                       anchors.leftMargin: Style.space(28)
                       anchors.right: parent.right
+                      anchors.rightMargin: row.rowBadge ? Style.space(36) : 0
                       anchors.verticalCenter: parent.verticalCenter
                       spacing: Style.space(1)
 
@@ -411,6 +423,32 @@ BarWidget {
                         font.pixelSize: Style.font.caption
                         elide: Text.ElideRight
                         maximumLineCount: 1
+                      }
+                    }
+
+                    // Unread-notification badge on a repo row (bell + count).
+                    // Clicking the repo shows the actual notifications.
+                    Row {
+                      anchors.right: parent.right
+                      anchors.verticalCenter: parent.verticalCenter
+                      spacing: Style.space(2)
+                      visible: row.rowBadge
+
+                      OpticalGlyph {
+                        width: Style.space(16)
+                        height: Style.space(18)
+                        text: "\uf0f3"
+                        fontFamily: root.bar ? root.bar.fontFamily : Style.font.resolvedFamily
+                        fontSize: Style.font.bodySmall
+                        color: modelData.notifUrgent ? "#e0af68" : "#cacccc"
+                      }
+
+                      Text {
+                        text: modelData.notifCount
+                        color: modelData.notifUrgent ? "#e0af68" : Color.muted
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.bodySmall
+                        verticalAlignment: Text.AlignVCenter
                       }
                     }
                   }
@@ -514,5 +552,22 @@ BarWidget {
     var footer = root.notLoggedIn ? Style.space(6) : Style.space(36)
     var gaps = Style.space(6) * 3
     return header + root.popupRowsHeight + footer + gaps
+  }
+
+  // Bar pill rendering for the calm/G states: bigger font plus a gentle
+  // downward bias so the G fills the same optical box as the other icons.
+  Component {
+    id: gPillIcon
+    Item {
+      anchors.fill: parent
+      OpticalGlyph {
+        anchors.centerIn: parent
+        anchors.verticalCenterOffset: root.gDrop
+        text: "\uDB82\uDEF4"
+        fontFamily: root.bar ? root.bar.fontFamily : Style.font.resolvedFamily
+        fontSize: Style.bar.iconFont * root.gScale * root.gExtra
+        color: root.highlighted ? root.activeColor : (root.bar ? root.bar.foreground : Color.foreground)
+      }
+    }
   }
 }

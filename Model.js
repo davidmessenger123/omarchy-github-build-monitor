@@ -238,11 +238,12 @@ function runSubtitle(run) {
 }
 
 // Flatten repo results into ready-to-render rows for the popup list.
+// Repos with unread notifications carry a badge (bell + count).
 // Row shapes:
-//   {kind:"repo", repo, state, icon, color, url}   (click: filter to this repo)
+//   {kind:"repo", repo, state, icon, color, url, notifCount, notifUrgent}
 //   {kind:"run",  repo, icon, color, title, subtitle, url}   (click: same filter)
-//   {kind:"error", repo, message}                  (click: same filter)
-function buildPopupRows(results) {
+//   {kind:"error", repo, message}                 (click: same filter)
+function buildPopupRows(results, notifications) {
   var rows = []
   for (var i = 0; i < (results || []).length; i++) {
     var result = results[i]
@@ -258,13 +259,16 @@ function buildPopupRows(results) {
       continue
     }
     var state = repoState(result.runs)
+    var notes = notificationsForRepo(result.repo, notifications)
     rows.push({
       kind: "repo",
       repo: result.repo,
       state: state,
       icon: statusIcon(state),
       color: statusColor(state, "#cacccc"),
-      url: result.repoUrl || githubActionsUrl(result.repo)
+      url: result.repoUrl || githubActionsUrl(result.repo),
+      notifCount: notes.length,
+      notifUrgent: notes.length > 0 && repoActionableCount(notes) > 0
     })
     for (var j = 0; j < (result.runs || []).length; j++) {
       var run = result.runs[j]
@@ -318,6 +322,21 @@ function isActionable(reason) {
   for (var i = 0; i < NOTIFY_ACTIONABLE.length; i++)
     if (NOTIFY_ACTIONABLE[i] === reason) return true
   return false
+}
+
+// Unread notifications belonging to one repository.
+function notificationsForRepo(repo, notifications) {
+  var notes = []
+  for (var i = 0; i < (notifications || []).length; i++)
+    if (notifications[i].repo === repo) notes.push(notifications[i])
+  return notes
+}
+
+function repoActionableCount(notes) {
+  var count = 0
+  for (var i = 0; i < notes.length; i++)
+    if (isActionable(notes[i].reason)) count++
+  return count
 }
 
 // Second, muted line for a notification row.
@@ -392,8 +411,9 @@ function deriveState(raw) {
   for (var n = 0; n < notifications.length; n++)
     if (isActionable(notifications[n].reason)) actionableCount++
 
-  var rows = notificationRows(notifications, actionableCount)
-  rows = rows.concat(buildPopupRows(results))
+  // Notifications are not listed at the top level: each affected repo row
+  // carries a bell badge instead, and clicking the repo reveals them.
+  var rows = buildPopupRows(results, notifications)
 
   var overall = STATUS_NEUTRAL
   var statusText = "No activity yet"
@@ -479,9 +499,7 @@ function repoNotificationRows(repo, notifications) {
     color: COLORS[STATUS_ATTENTION],
     subtitle: "Click to close this view"
   })
-  var notes = []
-  for (var i = 0; i < (notifications || []).length; i++)
-    if (notifications[i].repo === repo) notes.push(notifications[i])
+  var notes = notificationsForRepo(repo, notifications)
   if (notes.length === 0) {
     rows.push({
       kind: "empty",
@@ -532,6 +550,8 @@ if (typeof module !== "undefined" && module.exports) {
     githubNotificationsUrl: githubNotificationsUrl,
     notificationLabel: notificationLabel,
     notificationSubtitle: notificationSubtitle,
+    notificationsForRepo: notificationsForRepo,
+    repoActionableCount: repoActionableCount,
     notificationRows: notificationRows,
     repoNotificationRows: repoNotificationRows,
     unconfiguredMessage: unconfiguredMessage,
