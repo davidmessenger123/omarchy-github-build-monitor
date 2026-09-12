@@ -19,11 +19,23 @@ state across all of those repositories:
 | error | `exclamation-triangle` | orange | A repository could not be fetched |
 | neutral | `square-o` | foreground | No active pipelines, nothing alarming |
 | no account | `github` | amber | You aren't signed in — click to log in |
+| notification | `bell` | amber | Unread feedback needs your attention (see below) |
 
 Left-click opens a popup listing each repository's recent workflow runs
 (status, workflow name, branch, commit title, when it last ran, and a link to
 open the run). Right-click refreshes immediately; middle-click opens your
 repositories dashboard.
+
+## Unread notifications
+
+The monitor also watches your unread GitHub notifications. When one of them
+needs something from you specifically — a review requested on a PR you pushed,
+a mention, a reply on a thread you started, or a new assignment — the pill flips
+to a bell and reads "N notifications waiting". Middle-click jumps
+straight to your notifications inbox; the popup lists the feedback (reason,
+repository, when it happened) above the workflow runs. Other push-relevant
+events (CI activity, security alerts, subscriptions) stay in the popup without
+flipping the pill.
 
 ## Requirements
 

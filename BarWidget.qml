@@ -47,10 +47,13 @@ BarWidget {
   property int repoCount: 0             // account repos monitored
   property bool notLoggedIn: false      // no usable credentials -> sign in flow
   property bool ghAvailable: false      // is the gh CLI installed?
+  property var notifications: []        // unread notifications from the account
+  property int unreadCount: 0           // total unread notifications shown
+  property int actionableCount: 0       // ...that need your review/response
 
   readonly property bool highlighted: overall === "running" || overall === "pending" ||
     overall === "failure" || overall === "action-required" || overall === "error" ||
-    overall === Model.STATUS_LOGIN
+    overall === Model.STATUS_LOGIN || overall === Model.STATUS_ATTENTION
 
   readonly property string activeIcon: Model.statusIcon(overall)
   readonly property color activeColor: Model.statusColor(overall, root.bar ? root.bar.foreground : Color.foreground)
@@ -103,6 +106,9 @@ BarWidget {
     root.repoCount = state.repoCount
     root.notLoggedIn = state.notLoggedIn
     root.ghAvailable = state.ghAvailable
+    root.notifications = state.notifications
+    root.unreadCount = state.unreadCount
+    root.actionableCount = state.actionableCount
     root.updatedLabel = "Updated " + Model.clockTime(new Date())
   }
 
@@ -198,7 +204,9 @@ BarWidget {
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.RightButton) root.refresh()
       else if (buttonCode === Qt.MiddleButton) {
-        if (root.account !== "") root.shellOpen(Model.githubAccountReposUrl(root.account))
+        // Unread feedback waiting? Straight to the notifications inbox.
+        if (root.actionableCount > 0) root.shellOpen(Model.githubNotificationsUrl())
+        else if (root.account !== "") root.shellOpen(Model.githubAccountReposUrl(root.account))
         else if (root.repoResults.length > 0) root.shellOpen(root.repoResults[0].repoUrl)
       }
       else root.togglePanel()

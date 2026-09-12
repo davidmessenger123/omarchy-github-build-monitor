@@ -11,6 +11,7 @@ var STATUS_NEUTRAL = "neutral"
 var STATUS_ERROR = "error"
 var STATUS_UNKNOWN = "unknown"
 var STATUS_LOGIN = "login"
+var STATUS_ATTENTION = "attention"
 
 // Nerd Font (FA4 range, universally present) glyphs for each status.
 var GLYPHS = {
@@ -23,7 +24,8 @@ var GLYPHS = {
   "neutral": "\uf0c8",          // nf-fa-square_o — nothing notable
   "error": "\uf071",            // nf-fa-exclamation_triangle — fetch error
   "unknown": "\uf0c8",
-  "login": "\uf09b"             // nf-fa-github — not signed in
+  "login": "\uf09b",            // nf-fa-github — not signed in
+  "attention": "\uf0f3"         // nf-fa-bell — unread feedback waiting
 }
 
 // Soft, readable-on-dark status colors. Neutral slots resolve to the bar's
@@ -38,8 +40,16 @@ var COLORS = {
   "neutral": "",
   "error": "#ff9e64",
   "unknown": "",
-  "login": "#e0af68"
+  "login": "#e0af68",
+  "attention": "#e0af68"
 }
+
+// Notification reasons that mean a human wants something from you: a review
+// of a submitted change, a reply on a thread you started, a mention, or an
+// assignment. These flip the pill to the bell; other reasons (ci_activity,
+// build, security…) only add to the popup list.
+var NOTIFY_ACTIONABLE = ["review_requested", "mention", "comment", "author",
+  "team_mention", "assign"]
 
 function clampInt(value, min, max) {
   var n = parseInt(String(value), 10)
@@ -283,16 +293,53 @@ function githubAccountReposUrl(account) {
   return "https://github.com/" + String(account || "") + "?tab=repositories"
 }
 
+function githubNotificationsUrl() {
+  return "https://github.com/notifications"
+}
+
+// Short human label for a GitHub notification reason.
+function notificationLabel(reason) {
+  if (reason === "review_requested") return "review requested"
+  if (reason === "mention") return "mentioned you"
+  if (reason === "comment") return "commented"
+  if (reason === "author") return "replied to you"
+  if (reason === "team_mention") return "team mention"
+  if (reason === "assign") return "assigned to you"
+  if (reason === "ci_activity") return "CI activity"
+  if (reason === "build") return "build finished"
+  if (reason === "security_alert") return "security alert"
+  if (reason === "subscribed") return "subscribed"
+  return String(reason || "notification").replace(/_/g, " ")
+}
+
+function isActionable(reason) {
+  for (var i = 0; i < NOTIFY_ACTIONABLE.length; i++)
+    if (NOTIFY_ACTIONABLE[i] === reason) return true
+  return false
+}
+
+// Second, muted line for a notification row.
+function notificationSubtitle(note) {
+  var parts = []
+  if (note.repo) parts.push(note.repo)
+  parts.push(notificationLabel(note.reason))
+  var when = timeAgo(note.updated_at)
+  if (when !== "") parts.push(when)
+  return parts.join(" · ")
+}
+
 // Parse the helper's raw stdout into widget state in one pass. Handles the
 // account/not-logged-in/zero-repo shapes on top of the per-repo results.
 //
 // raw lines:
+//   {"__notification": {"reason", "title", "type", "repo", "html", "updated_at"}}
 //   {"repo": "...", "runs": [...], "repoUrl": "..."}   (or "error")
 //   {"__meta": {mode, account, repoCount, notLoggedIn, ghAvailable,
 //               limit, remaining, note}}
 function deriveState(raw) {
   var lines = String(raw || "").split("\n")
   var results = []
+  var notifications = []
   var meta = {}
   for (var i = 0; i < lines.length; i++) {
     var line = lines[i].trim()
@@ -301,6 +348,11 @@ function deriveState(raw) {
     try { obj = JSON.parse(line) } catch (e) { continue }
     if (!obj) continue
     if (obj.__meta) meta = obj.__meta
+    else if (obj.__notification) {
+      // Flat sibling keys ({"__notification": true, "reason": ...}), or
+      // nested, depending on producer — normalize both.
+      notifications.push(typeof obj.__notification === "object" ? obj.__notification : obj)
+    }
     else results.push(obj)
   }
 
@@ -318,6 +370,9 @@ function deriveState(raw) {
   if (notLoggedIn) {
     return {
       results: results,
+      notifications: notifications,
+      unreadCount: notifications.length,
+      actionableCount: 0,
       overall: STATUS_LOGIN,
       statusText: ghAvailable
         ? "No GitHub account logged in - click to sign in"
@@ -331,9 +386,21 @@ function deriveState(raw) {
     }
   }
 
+  var actionableCount = 0
+  for (var n = 0; n < notifications.length; n++)
+    if (isActionable(notifications[n].reason)) actionableCount++
+
+  var rows = notificationRows(notifications, actionableCount)
+  rows = rows.concat(buildPopupRows(results))
+
   var overall = STATUS_NEUTRAL
   var statusText = "No activity yet"
-  if (results.length === 0) {
+  // Unread review/mention/comment feedback outranks the pipeline state: a
+  // human asked you to look at something.
+  if (actionableCount > 0) {
+    overall = STATUS_ATTENTION
+    statusText = actionableCount + " notification" + (actionableCount > 1 ? "s" : "") + " waiting"
+  } else if (results.length === 0) {
     if (repoCount === 0 && meta.note) {
       overall = STATUS_ERROR
       statusText = String(meta.note).slice(0, 160)
@@ -351,15 +418,47 @@ function deriveState(raw) {
 
   return {
     results: results,
+    notifications: notifications,
+    unreadCount: notifications.length,
+    actionableCount: actionableCount,
     overall: overall,
     statusText: statusText,
-    rows: buildPopupRows(results),
+    rows: rows,
     rateStatus: rateStatus,
     notLoggedIn: false,
     ghAvailable: ghAvailable,
     account: account,
     repoCount: repoCount
   }
+}
+
+// Popup rows for the notifications section (sits above the repo runs).
+// Row shapes:
+//   {kind:"header", repo:"Notifications (N)", state, icon, color, url}
+//   {kind:"note",   icon, color, title, subtitle, url}
+function notificationRows(notifications, actionableCount) {
+  var rows = []
+  if (notifications.length === 0) return rows
+  rows.push({
+    kind: "header",
+    repo: "Notifications (" + notifications.length + ")",
+    state: actionableCount > 0 ? STATUS_ATTENTION : STATUS_NEUTRAL,
+    icon: GLYPHS[STATUS_ATTENTION],
+    color: actionableCount > 0 ? COLORS[STATUS_ATTENTION] : "",
+    url: githubNotificationsUrl()
+  })
+  for (var i = 0; i < notifications.length; i++) {
+    var note = notifications[i]
+    rows.push({
+      kind: "note",
+      icon: GLYPHS[STATUS_ATTENTION],
+      color: isActionable(note.reason) ? COLORS[STATUS_ATTENTION] : "#cacccc",
+      title: note.title || "Notification",
+      subtitle: notificationSubtitle(note),
+      url: note.html || githubNotificationsUrl()
+    })
+  }
+  return rows
 }
 
 // Empty-state text shown when shell.json has no repos field.
@@ -387,8 +486,12 @@ if (typeof module !== "undefined" && module.exports) {
     githubActionsUrl: githubActionsUrl,
     githubRepoUrl: githubRepoUrl,
     githubAccountReposUrl: githubAccountReposUrl,
+    githubNotificationsUrl: githubNotificationsUrl,
+    notificationLabel: notificationLabel,
+    notificationSubtitle: notificationSubtitle,
     unconfiguredMessage: unconfiguredMessage,
     STATUS_UNKNOWN: STATUS_UNKNOWN,
-    STATUS_LOGIN: STATUS_LOGIN
+    STATUS_LOGIN: STATUS_LOGIN,
+    STATUS_ATTENTION: STATUS_ATTENTION
   }
 }

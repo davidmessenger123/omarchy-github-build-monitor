@@ -123,6 +123,47 @@ def web_base(host):
     return host
 
 
+def notification_html(host, note):
+    """Web URL for a notification: convert the API subject URL to a
+    browser-friendly one, falling back to the repository page."""
+    subject = note.get("subject") or {}
+    api_url = subject.get("url") or ""
+    repo = (note.get("repository") or {}).get("full_name", "")
+    if "/repos/" in api_url:
+        path = api_url.split("/repos/", 1)[-1]
+        if path:
+            return "https://{0}/{1}".format(web_base(host), path)
+    if repo:
+        return "https://{0}/{1}".format(web_base(host), repo)
+    return "https://{0}/notifications".format(web_base(host))
+
+
+def fetch_notifications(args, host):
+    """Unread notifications for the logged-in account, newest first."""
+    notifications = []
+    try:
+        body, _ = http_json(host, "/notifications?per_page=100", args.token, args.timeout)
+    except urllib.error.HTTPError as error:
+        return [], http_error_message(error)
+    except urllib.error.URLError as error:
+        reason = getattr(error, "reason", None)
+        return [], "network error: {0}".format(reason or error)
+
+    for note in body:
+        if not note.get("unread"):
+            continue
+        subject = note.get("subject") or {}
+        notifications.append({
+            "reason": note.get("reason") or "subscribed",
+            "title": subject.get("title") or "",
+            "type": subject.get("type") or "Notification",
+            "repo": (note.get("repository") or {}).get("full_name", ""),
+            "html": notification_html(host, note),
+            "updated_at": note.get("updated_at") or "",
+        })
+    return notifications, ""
+
+
 def fetch_repo(args, host, repo):
     path = "/repos/{repo}/actions/runs?per_page={per_page}".format(
         repo=repo, per_page=args.per_page
@@ -207,6 +248,13 @@ def main():
         meta["repoCount"] = len(repos)
 
         if token:
+            # Unread notifications first: parse-order gives the popup the
+            # review/mention feedback at the top of the list.
+            notifications, note_error = fetch_notifications(args, host)
+            for note in notifications:
+                note["__notification"] = True
+                sys.stdout.write(json.dumps(note, separators=(",", ":")) + "\n")
+
             with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, max(1, len(repos)))) as pool:
                 results = list(pool.map(
                     lambda repo: fetch_repo(args, host, repo), repos))
