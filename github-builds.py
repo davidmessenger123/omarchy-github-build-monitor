@@ -1,31 +1,48 @@
 #!/usr/bin/env python3
 """Fetch recent GitHub Actions workflow runs for the Omarchy Build Monitor.
 
-Called by BarWidget.qml with one --repo argument per repository. Prints one
-compact JSON object per repository on its own line:
+Account mode (default): monitors every repository owned by the GitHub account
+currently logged in on this machine. The account comes from the gh CLI
+(`gh auth token` / `gh api user`); an explicit --token or the GITHUB_TOKEN
+environment variable overrides it. Repos are newest-updated first and capped
+by --max-repos.
+
+Extra repositories can be monitored alongside the account with one --repo
+argument per repository.
+
+Prints one compact JSON object per repository on its own line:
 
     {"repo": "owner/name", "runs": [...], "runUrl": "...", "repoUrl": "..."}
     {"repo": "owner/name", "error": "human readable message"}
 
-and a final line describing API rate-limit usage:
+and one final line describing the account and API rate-limit usage:
 
-    {"__meta": {"limit": 5000, "remaining": 4993}}
+    {"__meta": {"mode": "account", "account": "davidmessenger123",
+                "repoCount": 5, "notLoggedIn": false, "ghAvailable": true,
+                "limit": 5000, "remaining": 4993}}
+
+When no account is logged in the script prints only the __meta line with
+notLoggedIn true, so the widget can prompt the user to sign in.
 
 The widget parses line-by-line so one broken repository never corrupts the
 rest of the batch.
 
 Only the Python standard library is used, so the plugin needs no curl/jq.
-The token is read from --token or the GITHUB_TOKEN environment variable.
+The gh CLI is used only as the credential store when no token is given.
 """
 
 import argparse
 import json
 import os
+import shutil
+import subprocess
 import sys
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 DEFAULT_TIMEOUT = 12
+MAX_WORKERS = 8
 API_VERSION = "2022-11-28"
 USER_AGENT = "github-build-monitor/1.0"
 
@@ -41,33 +58,12 @@ def build_headers(token):
     return headers
 
 
-def fetch_repo(args, repo):
-    host = (args.host or "api.github.com").rstrip("/")
-    url = "https://{host}/repos/{repo}/actions/runs?per_page={per_page}".format(
-        host=host, repo=repo, per_page=args.per_page
-    )
-    request = urllib.request.Request(url, headers=build_headers(args.token))
-    try:
-        with urllib.request.urlopen(request, timeout=args.timeout) as response:
-            body = json.load(response)
-            headers = response.headers
-    except urllib.error.HTTPError as error:
-        message = http_error_message(error)
-        return {"repo": repo, "error": message}
-    except urllib.error.URLError as error:
-        reason = getattr(error, "reason", None)
-        return {"repo": repo, "error": "network error: {0}".format(reason or error)}
-
-    return {
-        "repo": repo,
-        "runs": body.get("workflow_runs") or [],
-        "runUrl": url,
-        "repoUrl": "https://{host}/{repo}/actions".format(host=host, repo=repo),
-        "rate": {
-            "limit": headers.get("X-RateLimit-Limit"),
-            "remaining": headers.get("X-RateLimit-Remaining"),
-        },
-    }
+def http_json(host, path, token, timeout):
+    """GET host+path as (json body, response). Raises HTTPError on failure."""
+    url = "https://{0}{1}".format(host, path)
+    request = urllib.request.Request(url, headers=build_headers(token))
+    response = urllib.request.urlopen(request, timeout=timeout)
+    return json.load(response), response
 
 
 def http_error_message(error):
@@ -81,30 +77,152 @@ def http_error_message(error):
     return message[:200]
 
 
+def resolve_token(args, host):
+    """Returns (token, source). source: token / env / gh / none."""
+    if args.token:
+        return args.token, "token"
+    if os.environ.get("GITHUB_TOKEN"):
+        return os.environ["GITHUB_TOKEN"].strip(), "env"
+    # The gh token only matches github.com; a custom --host needs its own token.
+    if host == "api.github.com" and shutil.which("gh"):
+        try:
+            out = subprocess.run(
+                ["gh", "auth", "token"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                timeout=args.timeout, check=True,
+            ).stdout.decode("utf-8", "replace").strip()
+        except (subprocess.SubprocessError, OSError):
+            return None, "gh"
+        if out:
+            return out, "gh"
+    return None, "none"
+
+
+def account_repos(args, host, token, timeout):
+    """Account login + newest-updated owned repos, capped by --max-repos."""
+    body, response = http_json(host, "/user", token, timeout)
+    login = body.get("login")
+    if not login:
+        raise ValueError("user endpoint returned no login")
+    owner_only = "/user/repos?affiliation=owner&sort=updated&per_page=100"
+    repos_body, _ = http_json(host, owner_only, token, timeout)
+    repos = [
+        repo["full_name"]
+        for repo in repos_body
+        if not repo.get("archived")
+    ][: args.max_repos]
+    return login, repos, response
+
+
+def web_base(host):
+    """Human-facing web host for an API host (api.github.com -> github.com)."""
+    if host == "api.github.com":
+        return "github.com"
+    if host.startswith("api."):
+        return host[len("api."):]
+    return host
+
+
+def fetch_repo(args, host, repo):
+    path = "/repos/{repo}/actions/runs?per_page={per_page}".format(
+        repo=repo, per_page=args.per_page
+    )
+    try:
+        body, response = http_json(host, path, args.token, args.timeout)
+        headers = response.headers
+    except urllib.error.HTTPError as error:
+        return {"repo": repo, "error": http_error_message(error)}
+    except urllib.error.URLError as error:
+        reason = getattr(error, "reason", None)
+        return {"repo": repo, "error": "network error: {0}".format(reason or error)}
+
+    return {
+        "repo": repo,
+        "runs": body.get("workflow_runs") or [],
+        "runUrl": "https://{0}{1}".format(host, path),
+        "repoUrl": "https://{0}/{1}/actions".format(web_base(host), repo),
+        "rate": {
+            "limit": headers.get("X-RateLimit-Limit"),
+            "remaining": headers.get("X-RateLimit-Remaining"),
+        },
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--repo", action="append", required=True,
-                        help="owner/name (repeatable)")
+    parser.add_argument("--repo", action="append", default=[],
+                        help="extra owner/name to monitor alongside the account (repeatable)")
+    parser.add_argument("--max-repos", type=int, default=30,
+                        help="how many of the account's repos to monitor, newest-updated first")
     parser.add_argument("--per-page", type=int, default=6)
     parser.add_argument("--host", default="")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
-    parser.add_argument("--token", default=os.environ.get("GITHUB_TOKEN") or "")
+    parser.add_argument("--token", default="",
+                        help="explicit token (default: GITHUB_TOKEN, then gh CLI auth)")
     args = parser.parse_args()
 
     if args.per_page < 1:
         args.per_page = 1
+    if args.max_repos < 1:
+        args.max_repos = 1
 
-    rate = None
-    for i, repo in enumerate(args.repo):
-        result = fetch_repo(args, repo)
-        if result.get("rate"):
-            rate = result["rate"]
-        result.pop("rate", None)
-        sys.stdout.write(json.dumps(result, separators=(",", ":")) + "\n")
+    host = (args.host or "api.github.com").rstrip("/")
+    gh_available = shutil.which("gh") is not None
+    token, source = resolve_token(args, host)
+    args.token = token
 
-    if rate:
-        sys.stdout.write(json.dumps(
-            {"__meta": rate}, separators=(",", ":")) + "\n")
+    meta = {
+        "mode": "account",
+        "account": "",
+        "repoCount": 0,
+        "authSource": source,
+        "ghAvailable": gh_available,
+        "limit": None,
+        "remaining": None,
+        "notLoggedIn": False,
+        "note": "",
+    }
+
+    repos = []
+    try:
+        login, repos, user_response = account_repos(args, host, token, args.timeout)
+        meta["account"] = login
+        meta["limit"] = user_response.headers.get("X-RateLimit-Limit")
+        meta["remaining"] = user_response.headers.get("X-RateLimit-Remaining")
+    except urllib.error.HTTPError as error:
+        meta["notLoggedIn"] = error.code in (401, 403)
+        meta["note"] = http_error_message(error)
+    except Exception as error:
+        meta["note"] = "network error: {0}".format(error)
+
+    if not meta["notLoggedIn"] and repos:
+        # Deduplicate, keeping account repos first, then the user's extras.
+        seen = set()
+        ordered = []
+        for repo in repos + (args.repo or []):
+            if repo not in seen:
+                seen.add(repo)
+                ordered.append(repo)
+        repos = ordered
+        meta["repoCount"] = len(repos)
+
+        if token:
+            with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, max(1, len(repos)))) as pool:
+                results = list(pool.map(
+                    lambda repo: fetch_repo(args, host, repo), repos))
+        else:
+            results = [{"repo": repo, "error": "no credentials"} for repo in repos]
+
+        for result in results:
+            rate = result.pop("rate", None)
+            if rate:
+                meta["limit"] = meta["limit"] or rate["limit"]
+                meta["remaining"] = rate["remaining"]
+            sys.stdout.write(json.dumps(result, separators=(",", ":")) + "\n")
+    elif not meta["notLoggedIn"] and not repos and token:
+        meta["note"] = "no repositories found for {0}".format(meta["account"] or "account")
+
+    sys.stdout.write(json.dumps({"__meta": meta}, separators=(",", ":")) + "\n")
     sys.stdout.flush()
 
 

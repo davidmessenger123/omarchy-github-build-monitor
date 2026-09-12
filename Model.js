@@ -10,6 +10,7 @@ var STATUS_ACTION_REQUIRED = "action-required"
 var STATUS_NEUTRAL = "neutral"
 var STATUS_ERROR = "error"
 var STATUS_UNKNOWN = "unknown"
+var STATUS_LOGIN = "login"
 
 // Nerd Font (FA4 range, universally present) glyphs for each status.
 var GLYPHS = {
@@ -21,7 +22,8 @@ var GLYPHS = {
   "action-required": "\uf06a",  // nf-fa-exclamation_circle
   "neutral": "\uf0c8",          // nf-fa-square_o — nothing notable
   "error": "\uf071",            // nf-fa-exclamation_triangle — fetch error
-  "unknown": "\uf0c8"
+  "unknown": "\uf0c8",
+  "login": "\uf09b"             // nf-fa-github — not signed in
 }
 
 // Soft, readable-on-dark status colors. Neutral slots resolve to the bar's
@@ -35,7 +37,8 @@ var COLORS = {
   "action-required": "#e0af68",
   "neutral": "",
   "error": "#ff9e64",
-  "unknown": ""
+  "unknown": "",
+  "login": "#e0af68"
 }
 
 function clampInt(value, min, max) {
@@ -276,6 +279,89 @@ function githubRepoUrl(repo) {
   return "https://github.com/" + String(repo || "")
 }
 
+function githubAccountReposUrl(account) {
+  return "https://github.com/" + String(account || "") + "?tab=repositories"
+}
+
+// Parse the helper's raw stdout into widget state in one pass. Handles the
+// account/not-logged-in/zero-repo shapes on top of the per-repo results.
+//
+// raw lines:
+//   {"repo": "...", "runs": [...], "repoUrl": "..."}   (or "error")
+//   {"__meta": {mode, account, repoCount, notLoggedIn, ghAvailable,
+//               limit, remaining, note}}
+function deriveState(raw) {
+  var lines = String(raw || "").split("\n")
+  var results = []
+  var meta = {}
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i].trim()
+    if (line === "") continue
+    var obj = null
+    try { obj = JSON.parse(line) } catch (e) { continue }
+    if (!obj) continue
+    if (obj.__meta) meta = obj.__meta
+    else results.push(obj)
+  }
+
+  var notLoggedIn = meta.notLoggedIn === true
+  var account = String(meta.account || "")
+  var ghAvailable = meta.ghAvailable === true
+  var repoCount = clampInt(meta.repoCount, 0, 100000)
+
+  var rateStatus = ""
+  if (meta.remaining !== undefined && meta.remaining !== null &&
+      meta.limit !== undefined && meta.limit !== null) {
+    rateStatus = "Rate limit: " + meta.remaining + " / " + meta.limit + " used"
+  }
+
+  if (notLoggedIn) {
+    return {
+      results: results,
+      overall: STATUS_LOGIN,
+      statusText: ghAvailable
+        ? "No GitHub account logged in - click to sign in"
+        : "gh CLI not found - install it to sign in",
+      rows: [],
+      rateStatus: rateStatus,
+      notLoggedIn: true,
+      ghAvailable: ghAvailable,
+      account: account,
+      repoCount: 0
+    }
+  }
+
+  var overall = STATUS_NEUTRAL
+  var statusText = "No activity yet"
+  if (results.length === 0) {
+    if (repoCount === 0 && meta.note) {
+      overall = STATUS_ERROR
+      statusText = String(meta.note).slice(0, 160)
+    } else if (repoCount === 0) {
+      overall = STATUS_NEUTRAL
+      statusText = account !== ""
+        ? "No repositories found for " + account
+        : "No repositories found"
+    }
+  } else {
+    var derived = deriveOverall(results, true)
+    overall = derived.overall
+    statusText = derived.statusText
+  }
+
+  return {
+    results: results,
+    overall: overall,
+    statusText: statusText,
+    rows: buildPopupRows(results),
+    rateStatus: rateStatus,
+    notLoggedIn: false,
+    ghAvailable: ghAvailable,
+    account: account,
+    repoCount: repoCount
+  }
+}
+
 // Empty-state text shown when shell.json has no repos field.
 function unconfiguredMessage() {
   return "Configure repositories in shell.json, e.g.\n" +
@@ -291,6 +377,7 @@ if (typeof module !== "undefined" && module.exports) {
     runState: runState,
     repoState: repoState,
     deriveOverall: deriveOverall,
+    deriveState: deriveState,
     statusIcon: statusIcon,
     statusColor: statusColor,
     timeAgo: timeAgo,
@@ -299,7 +386,9 @@ if (typeof module !== "undefined" && module.exports) {
     buildPopupRows: buildPopupRows,
     githubActionsUrl: githubActionsUrl,
     githubRepoUrl: githubRepoUrl,
+    githubAccountReposUrl: githubAccountReposUrl,
     unconfiguredMessage: unconfiguredMessage,
-    STATUS_UNKNOWN: STATUS_UNKNOWN
+    STATUS_UNKNOWN: STATUS_UNKNOWN,
+    STATUS_LOGIN: STATUS_LOGIN
   }
 }

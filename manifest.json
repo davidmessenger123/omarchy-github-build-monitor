@@ -7,7 +7,7 @@
   "author": "David JM",
   "license": "MIT",
   "repository": "https://github.com/davidmessenger123/omarchy-github-build-monitor",
-  "description": "Real-time GitHub Actions status for your repositories, shown in the Omarchy bar.",
+  "description": "Real-time GitHub Actions status for every repository owned by the logged-in GitHub account, shown in the Omarchy bar.",
   "kinds": [
     "bar-widget"
   ],
@@ -16,12 +16,13 @@
   },
   "barWidget": {
     "displayName": "GitHub Build Monitor",
-    "description": "Shows the state of the most recent GitHub Actions workflow runs for your repositories and opens a detailed list.",
+    "description": "Monitors every repository owned by the GitHub account that is currently logged in (gh CLI or GITHUB_TOKEN). A pill in the bar reflects the newest Actions state across those repos and opens a detailed run list. If no account is signed in the pill asks to log in and launches `gh auth login` in a terminal.",
     "category": "Info",
     "defaultSection": "right",
     "allowMultiple": false,
     "defaults": {
       "repos": "",
+      "maxRepos": 30,
       "token": "",
       "host": "",
       "interval": 60,
@@ -31,20 +32,27 @@
       {
         "key": "repos",
         "type": "string",
-        "label": "Repositories",
-        "description": "Comma-separated owner/name pairs, e.g. HANCORE-linux/Shibumi-Shell, cli/cli"
+        "label": "Extra repositories",
+        "description": "Comma-separated owner/name pairs to monitor in addition to the logged-in account's own repos, e.g. HANCORE-linux/Shibumi-Shell. Leave empty to watch only the account."
+      },
+      {
+        "key": "maxRepos",
+        "type": "integer",
+        "label": "Repos from account",
+        "defaultValue": 30,
+        "description": "How many of the account's repositories to monitor, newest-updated first."
       },
       {
         "key": "token",
         "type": "string",
         "label": "GitHub token",
-        "description": "Optional personal access token (also read from the GITHUB_TOKEN environment variable). Raises the API rate limit to 5000 req/h."
+        "description": "Optional personal access token (also read from the GITHUB_TOKEN environment variable). Overrides the gh CLI login; raises the API rate limit to 5000 req/h."
       },
       {
         "key": "host",
         "type": "string",
         "label": "API host",
-        "description": "Leave empty for github.com. Set for GitHub Enterprise (e.g. github.example.com)."
+        "description": "Leave empty for github.com. Set for GitHub Enterprise (e.g. github.example.com), with a matching token for that host."
       },
       {
         "key": "interval",

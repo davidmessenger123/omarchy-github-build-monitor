@@ -8,14 +8,17 @@ import "Model.js" as Model
 // GitHub Build Monitor
 //
 // Real-time indicator in the bar for the state of your GitHub Actions
-// CI/CD pipelines. Polls the Actions API for every configured repository
+// CI/CD pipelines. Monitors every repository owned by the GitHub account
+// that is currently logged in on this machine (via gh CLI or GITHUB_TOKEN)
 // and renders one status pill; left-click opens a list of recent workflow
-// runs, right-click refreshes immediately.
+// runs, right-click refreshes immediately. If no account is logged in the
+// pill asks to sign in and left-click launches `gh auth login` in a terminal.
 //
-// Configuration lives on the bar layout entry in shell.json:
+// Optional configuration lives on the bar layout entry in shell.json:
 //   {
 //     "id": "davidjm.github-build-monitor",
-//     "repos": "HANCORE-linux/Shibumi-Shell, cli/cli",
+//     "repos": "HANCORE-linux/Shibumi-Shell",  // extra repos beyond the account
+//     "maxRepos": 30,
 //     "token": "",
 //     "host": "",
 //     "interval": 60,
@@ -27,7 +30,9 @@ BarWidget {
 
   // ---- configuration ------------------------------------------------------
 
-  readonly property var repoList: Model.parseRepos(setting("repos", ""))
+  // Optional extra repositories to watch in addition to the account's own.
+  readonly property var extraRepos: Model.parseRepos(setting("repos", ""))
+  readonly property int maxRepos: Model.clampInt(setting("maxRepos", 30), 1, 100)
   readonly property string apiHost: setting("host", "")
   readonly property string githubToken: setting("token", "")
   readonly property int perPage: Model.clampInt(setting("perPage", 6), 1, 30)
@@ -37,45 +42,44 @@ BarWidget {
 
   property var repoResults: []          // [{repo, error?, runs?, runUrl?}]
   property string overall: Model.STATUS_UNKNOWN
-  property string statusText: "No repositories configured"
+  property string statusText: "Checking GitHub account…"
   property var popupRows: []            // flattened [{kind, ...}] for the panel
   property string rateStatus: ""
   property string updatedLabel: ""
   property bool fetchBusy: false
+  property string account: ""           // login of the watched GitHub account
+  property int repoCount: 0             // account repos monitored
+  property bool notLoggedIn: false      // no usable credentials -> sign in flow
+  property bool ghAvailable: false      // is the gh CLI installed?
 
-  readonly property bool unconfigured: repoList.length === 0
   readonly property bool highlighted: overall === "running" || overall === "pending" ||
-    overall === "failure" || overall === "action-required" || overall === "error"
+    overall === "failure" || overall === "action-required" || overall === "error" ||
+    overall === Model.STATUS_LOGIN
 
   readonly property string activeIcon: Model.statusIcon(overall)
   readonly property color activeColor: Model.statusColor(overall, root.bar ? root.bar.foreground : Color.foreground)
 
-  // Hide entirely until at least one repository is configured.
-  visible: !unconfigured
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
   // ---- polling ------------------------------------------------------------
 
   function refresh() {
-    if (root.unconfigured) {
-      root.repoResults = []
-      root.overall = Model.STATUS_UNKNOWN
-      root.statusText = "No repositories configured"
-      root.popupRows = []
-      root.updatedLabel = ""
-      return
-    }
     if (root.fetchBusy) return
 
+    // Account mode by default: the helper resolves the logged-in GitHub
+    // account itself (gh CLI, GITHUB_TOKEN, or the `token` setting) and
+    // monitors that account's repositories. Extra --repo flags add repos
+    // that don't belong to the account (organization-owned, a coworker's…).
     var command = ["python3",
       Model.scriptPath(Qt.resolvedUrl("github-builds.py")),
       "--per-page", String(root.perPage),
+      "--max-repos", String(root.maxRepos),
       "--timeout", "12"]
     if (root.apiHost !== "") { command.push("--host"); command.push(root.apiHost) }
     if (root.githubToken !== "") { command.push("--token"); command.push(root.githubToken) }
-    for (var i = 0; i < root.repoList.length; i++) {
-      command.push("--repo"); command.push(root.repoList[i])
+    for (var i = 0; i < root.extraRepos.length; i++) {
+      command.push("--repo"); command.push(root.extraRepos[i])
     }
 
     fetcher.command = command
@@ -85,35 +89,16 @@ BarWidget {
 
   function ingest(raw) {
     root.fetchBusy = false
-    var results = []
-    var meta = {}
-    var lines = String(raw || "").split("\n")
-    for (var i = 0; i < lines.length; i++) {
-      var line = lines[i].trim()
-      if (line === "") continue
-      var obj = null
-      try { obj = JSON.parse(line) } catch (e) { continue }
-      if (!obj) continue
-      if (obj.__meta) { meta = obj.__meta; continue }
-      results.push(obj)
-    }
-    root.repoResults = results
-
-    root.rateStatus = meta.remaining !== undefined && meta.limit !== undefined
-      ? "Rate limit: " + meta.remaining + " / " + meta.limit + " used"
-      : ""
-
-    if (results.length === 0 && !root.unconfigured) {
-      // The fetcher produced nothing readable — python3 missing, crash, or a
-      // full transport failure before any per-repo line was written.
-      root.overall = Model.STATUS_ERROR
-      root.statusText = "Fetch failed (is python3 installed?)"
-    } else {
-      var derived = Model.deriveOverall(results, !root.unconfigured)
-      root.overall = derived.overall
-      root.statusText = derived.statusText
-    }
-    root.popupRows = Model.buildPopupRows(results)
+    var state = Model.deriveState(raw)
+    root.repoResults = state.results
+    root.overall = state.overall
+    root.statusText = state.statusText
+    root.popupRows = state.rows
+    root.rateStatus = state.rateStatus
+    root.account = state.account
+    root.repoCount = state.repoCount
+    root.notLoggedIn = state.notLoggedIn
+    root.ghAvailable = state.ghAvailable
     root.updatedLabel = "Updated " + Model.clockTime(new Date())
   }
 
@@ -136,7 +121,7 @@ BarWidget {
   Timer {
     id: pollTimer
     interval: root.pollIntervalMs
-    running: !root.unconfigured
+    running: true
     repeat: true
     triggeredOnStart: true
     onTriggered: root.refresh()
@@ -158,9 +143,30 @@ BarWidget {
   // Single source of truth that the KeyboardPanel below mirrors via its
   // `open` binding.
   property bool opened: false
-  function open() { root.opened = true }
+  function open() {
+    // Not signed in? The "popup" is the sign-in flow instead.
+    if (root.notLoggedIn) { root.loginAction(); return }
+    root.opened = true
+  }
   function close() { root.opened = false }
-  function togglePanel() { root.opened = !root.opened }
+  function togglePanel() {
+    if (root.notLoggedIn) { root.loginAction(); return }
+    root.opened = !root.opened
+  }
+
+  // Ask the user to log a GitHub account in. The gh CLI owns the credentials;
+  // `omarchy-launch-terminal` runs it in the user's terminal so the device
+  // flow can complete interactively. The next poll picks the account up
+  // automatically.
+  function loginAction() {
+    if (root.ghAvailable) {
+      Quickshell.execDetached(["omarchy-launch-terminal", "gh", "auth", "login"])
+    } else {
+      Quickshell.execDetached(["omarchy-notification-send",
+        "GitHub Build Monitor",
+        "The gh CLI is missing. Install it (sudo pacman -S github-cli), sign in, and the monitor will start tracking your account."])
+    }
+  }
 
   function shellOpen(url) {
     if (!url) return
@@ -184,7 +190,10 @@ BarWidget {
     tooltipText: root.statusText
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.RightButton) root.refresh()
-      else if (buttonCode === Qt.MiddleButton) { if (root.repoList.length > 0) root.shellOpen(Model.githubRepoUrl(root.repoList[0])) }
+      else if (buttonCode === Qt.MiddleButton) {
+        if (root.account !== "") root.shellOpen(Model.githubAccountReposUrl(root.account))
+        else if (root.repoResults.length > 0) root.shellOpen(root.repoResults[0].repoUrl)
+      }
       else root.togglePanel()
     }
   }
@@ -231,7 +240,7 @@ BarWidget {
             spacing: Style.space(2)
             Text {
               width: parent.width
-              text: "GitHub Builds"
+              text: root.account !== "" ? "GitHub Builds · @" + root.account : "GitHub Builds"
               color: Color.popups.text
               font.family: Style.font.family
               font.pixelSize: Style.font.body
@@ -240,7 +249,7 @@ BarWidget {
             }
             Text {
               width: parent.width
-              text: root.unconfigured ? Model.unconfiguredMessage() : (root.statusText + (root.updatedLabel !== "" ? " · " + root.updatedLabel : ""))
+              text: root.statusText + (root.updatedLabel !== "" ? " · " + root.updatedLabel : "")
               color: Color.muted
               font.family: Style.font.family
               font.pixelSize: Style.font.caption
@@ -356,9 +365,9 @@ BarWidget {
             Text {
               id: emptyState
               width: parent.width
-              visible: root.popupRows.length === 0
-              text: root.unconfigured
-                ? "Add \"repos\": \"owner/repo\" to this widget's settings."
+              visible: root.popupRows.length === 0 && !root.notLoggedIn
+              text: root.repoCount === 0
+                ? "No repositories found for " + (root.account !== "" ? root.account : "this account") + "."
                 : "No workflow runs reported yet."
               color: Color.muted
               font.family: Style.font.family
@@ -369,27 +378,28 @@ BarWidget {
           }
         }
 
-        // Footer with rate-limit status and open-in-browser affordance.
+        // Footer with rate-limit status and account dashboard shortcut.
         Row {
           id: footerRow
           width: parent.width
-          visible: !root.unconfigured
+          visible: !root.notLoggedIn
           Text {
             width: parent.width / 2
             text: root.rateStatus !== ""
               ? root.rateStatus
-              : (root.repoList.length > 0 ? "Monitoring " + root.repoList.length + " repo(s)" : "")
+              : (root.account !== ""
+                  ? "@" + root.account + " · " + root.repoCount + (root.repoCount === 1 ? " repo" : " repos")
+                  : "")
             color: Color.muted
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
             elide: Text.ElideRight
           }
           Button {
-            text: "Open Actions"
+            text: "Dashboard"
             fontSize: Style.font.caption
             onClicked: {
-              if (root.repoList.length > 0)
-                root.shellOpen(Model.githubActionsUrl(root.repoList[0]))
+              if (root.account !== "") root.shellOpen(Model.githubAccountReposUrl(root.account))
               else if (root.repoResults.length > 0 && root.repoResults[0].repoUrl)
                 root.shellOpen(root.repoResults[0].repoUrl)
             }
@@ -415,7 +425,7 @@ BarWidget {
 
   readonly property real popupImplicitHeight: {
     var header = Style.space(34)
-    var footer = root.unconfigured ? Style.space(6) : Style.space(30)
+    var footer = root.notLoggedIn ? Style.space(6) : Style.space(30)
     var gaps = Style.space(6) * 3
     return header + root.popupRowsHeight + footer + gaps
   }

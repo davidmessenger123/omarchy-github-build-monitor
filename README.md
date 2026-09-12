@@ -1,10 +1,12 @@
 # GitHub Build Monitor
 
 A real-time status indicator for the [Omarchy](https://omarchy.org/) shell bar
-that shows the health of your GitHub Actions CI/CD pipelines.
+that watches the GitHub Actions CI/CD pipelines of **every repository owned by
+the GitHub account currently logged in on your machine.**
 
-One pill in the bar reflects the newest workflow state across every monitored
-repository:
+The account comes from the `gh` CLI (`gh auth login`); an explicit token or
+`GITHUB_TOKEN` overrides it. One pill in the bar reflects the newest workflow
+state across all of those repositories:
 
 | State | Icon | Color | Meaning |
 | --- | --- | --- | --- |
@@ -16,17 +18,30 @@ repository:
 | cancelled | `ban` | foreground | Newest run was cancelled |
 | error | `exclamation-triangle` | orange | A repository could not be fetched |
 | neutral | `square-o` | foreground | No active pipelines, nothing alarming |
+| no account | `github` | amber | You aren't signed in — click to log in |
 
 Left-click opens a popup listing each repository's recent workflow runs
 (status, workflow name, branch, commit title, when it last ran, and a link to
-open the run). Right-click refreshes immediately; the middle-click opens the
-first repository's Actions page.
+open the run). Right-click refreshes immediately; middle-click opens your
+repositories dashboard.
 
 ## Requirements
 
 - Omarchy 4.x with the stock shell bar
 - `python3` (Arch base already includes it)
+- The [`gh` CLI](https://cli.github.com/) installed and signed in — unless you
+  set a `token` or `GITHUB_TOKEN` yourself (see below)
 - Network access to `api.github.com` (or your GitHub Enterprise host)
+
+## No account signed in?
+
+While no GitHub account is logged in the pill turns amber with a GitHub glyph
+and reads "No GitHub account logged in — click to sign in". Clicking it opens
+your terminal on `gh auth login`; once you complete the device flow the widget
+picks the account up on its next poll (a minute, or right-click to refresh
+immediately).
+
+If `gh` isn't installed you get a notification telling you how to install it.
 
 ## Install
 
@@ -48,8 +63,8 @@ with `omarchy bar move`.
 
 ## Configure
 
-The widget hides itself until at least one repository is configured. Add the
-entry to `~/.config/omarchy/shell.json` under the section you want:
+Nothing is required — add the entry and it starts monitoring the logged-in
+account. Optional settings go on the entry in `~/.config/omarchy/shell.json`:
 
 ```json
 {
@@ -60,7 +75,8 @@ entry to `~/.config/omarchy/shell.json` under the section you want:
         { "id": "hancore.shibumi.bar" },
         {
           "id": "davidjm.github-build-monitor",
-          "repos": "HANCORE-linux/Shibumi-Shell, cli/cli",
+          "repos": "HANCORE-linux/Shibumi-Shell",
+          "maxRepos": 30,
           "interval": 60,
           "perPage": 6
         }
@@ -76,17 +92,20 @@ The shell hot-reloads `shell.json` on save.
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `repos` | string | `""` | Comma-separated `owner/name` pairs. Required. |
-| `token` | string | `""` | Optional GitHub personal access token. |
-| `host` | string | `""` | API host for GitHub Enterprise (e.g. `github.example.com`). |
+| `repos` | string | `""` | Extra `owner/name` pairs to monitor **in addition** to your account's own repos (org-owned, teammates', …). Empty = your account only. |
+| `maxRepos` | integer | `30` | How many of the account's repositories to monitor, newest-updated first. |
+| `token` | string | `""` | Personal access token. Overrides the `gh` login. |
+| `host` | string | `""` | API host for GitHub Enterprise. Requires a token for that host. |
 | `interval` | integer | `60` | Poll interval in seconds (15–3600). |
 | `perPage` | integer | `6` | Workflow runs listed per repository (1–30). |
 
 ## Rate limits
 
-Without a token GitHub allows 60 requests/hour per IP. With a token (created
-with `repo` scope) the ceiling is 5,000/hour, which comfortably covers a
-1-minute poll. The widget shows the remaining quota in the popup footer.
+Signed in through `gh` the API limit is 5,000 requests/hour. A 1-minute poll
+over 30 repos costs ~32 requests, so even smaller setups get a large headroom.
+Without a token the anonymous limit drops to 60/hour — the login flow exists
+precisely to keep you on the authenticated quota. The popup footer shows the
+current remaining quota.
 
 The token is **not** required to start. Set it on the widget setting or export
 it for the shell process:
@@ -97,17 +116,20 @@ GITHUB_TOKEN=ghp_xxx omarchy restart shell
 
 The token is stored in plain text in `~/.config/omarchy/shell.json` if you put
 it there, and is passed as an argument to a short-lived Python process. Prefer
-the environment variable if you share the config file.
+the `gh` login or the environment variable if you share the config file.
 
 ## How it works
 
 On each tick the widget runs the bundled `github-builds.py` (Python stdlib
-only) against the
+only). It resolves the logged-in account (`--token`, then `GITHUB_TOKEN`, then
+`gh auth token`), lists the account's owned repositories newest-updated first,
+and fetches each repo's
 [`GET /repos/{owner}/{repo}/actions/runs`](https://docs.github.com/en/rest/actions/workflow-runs)
-endpoint. Each repository's response is printed as one JSON line, so a failure
-in one repo never corrupts the others. The QML parses those lines, derives a
-widget-wide state (running > pending > failure > action-required > error >
-success > neutral), colors the pill, and builds the popup list.
+in parallel. Each repository's response is printed as one JSON line, so a
+failure in one repo never corrupts the others. A `__meta` line reports the
+account, repo count, rate limit, and whether anyone is signed in at all. The
+QML derives a widget-wide state (running > pending > failure > action-required
+> error > success > neutral), colors the pill, and builds the popup list.
 
 ## License
 
