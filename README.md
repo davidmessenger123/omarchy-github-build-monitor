@@ -158,14 +158,22 @@ resource-bound traps:
   the child; the interpreter itself is an absolute path.
 - Any configured token is delivered via the `GITHUB_TOKEN` **environment
   variable**, never through argv.
+- When no token is configured, `gh auth token` (the credential source) is
+  resolved **only from system-owned directories** (`/usr/local/bin`, `/usr/bin`,
+  `/bin`) and its realpath is verified to live under `/usr` or `/bin` — a
+  user-writable shim (for example `~/.local/bin/gh`, mise shims, or Cargo bin)
+  can never be used to mint the credential. Its output is streamed under a
+  1 KiB cap and an 8-second deadline, and the child's whole process group is
+  killed if it misbehaves or is left dangling.
 - Credentials are attached **only to the configured API origin**
   (`api.github.com` by default, or your `host` setting). When the helper
   follows a notification's `subject.url` to read thread text, the URL must be
   `https` on exactly that host or it is refused — a hostile URL can never
   receive the Bearer token.
 - Every response is read **incrementally and capped** (4 MiB default, 512 KiB
-  for subject bodies), and arrays are sliced to the requested page sizes, so
-  a malformed or hostile payload cannot balloon memory.
+  for subject bodies, 64 KiB for HTTP error bodies), and arrays are sliced to
+  the requested page sizes, so a malformed or hostile payload cannot balloon
+  memory.
 - There is a **whole-process deadline**: the helper arms a SIGALRM wall clock
   and the shell process keeps an independent watchdog that stops the child and
   surfaces a timeout instead of hanging the recurring poll.

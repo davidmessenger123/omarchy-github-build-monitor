@@ -36,10 +36,12 @@ import json
 import math
 import os
 import pwd
+import select
 import shutil
 import signal
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -51,8 +53,18 @@ MAX_BODY_NOTES = 10
 CHUNK_BYTES = 65536
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_SUBJECT_BYTES = 512 * 1024
+MAX_ERROR_BYTES = 64 * 1024
+GH_TOKEN_MAX_BYTES = 1024
+GH_DEADLINE = 8
 API_VERSION = "2022-11-28"
 USER_AGENT = "github-notify-center/1.0"
+
+# The gh CLI is the credential source when no explicit token is given, so it is
+# only ever resolved from system-owned directories. User-writable PATH entries
+# (~/.local/bin, mise shims, Cargo bin) are deliberately excluded: a shim there
+# must never be allowed to mint credentials for us.
+SYSTEM_BINDIRS = ["/usr/local/bin", "/usr/bin", "/bin"]
+SYSTEM_PATH = ":".join(SYSTEM_BINDIRS)
 
 
 # Deterministic runtime: the widget launches this helper with a cleared
@@ -63,22 +75,105 @@ def prepare_environment():
             os.environ["HOME"] = pwd.getpwuid(os.getuid()).pw_dir
         except Exception:
             pass
-    home = os.environ.get("HOME") or ""
-    per_user = []
-    if home:
-        per_user = [
-            os.path.join(home, ".local", "bin"),
-            os.path.join(home, ".local", "share", "mise", "shims"),
-            os.path.join(home, ".cargo", "bin"),
-        ]
-    parts = ["/usr/local/bin", "/usr/bin", "/bin"] + per_user
-    seen = set()
-    ordered = []
-    for part in parts:
-        if part and part not in seen:
-            seen.add(part)
-            ordered.append(part)
-    os.environ["PATH"] = ":".join(ordered)
+    # System directories only. Anything executed by this process (currently
+    # just `gh`) is resolved to a verified absolute path, never via a
+    # user-writable PATH entry.
+    os.environ["PATH"] = SYSTEM_PATH
+
+
+def _trusted_gh():
+    """Resolve `gh` to a verified system binary, or None.
+
+    The search is pinned to system-owned directories and the final realpath is
+    checked to still live under /usr or /bin, so a user-writable shim (for
+    example ~/.local/bin/gh) can never be used as the credential source."""
+    resolved = shutil.which("gh", path=SYSTEM_PATH)
+    if not resolved:
+        return None
+    try:
+        real = os.path.realpath(resolved)
+    except OSError:
+        return None
+    if real.startswith("/usr/") or real.startswith("/bin/"):
+        return real
+    return None
+
+
+def _kill_group(proc):
+    try:
+        pgid = os.getpgid(proc.pid)
+    except ProcessLookupError:
+        return
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except OSError:
+        pass
+
+
+def _read_capped_stream(stream, max_bytes, deadline):
+    """Read a child's stdout up to a byte cap, within a wall-clock deadline."""
+    chunks = []
+    size = 0
+    end = time.monotonic() + deadline
+    while True:
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.SubprocessError("gh timed out")
+        ready, _, _ = select.select([stream], [], [], max(0.0, remaining))
+        if not ready:
+            raise subprocess.SubprocessError("gh timed out")
+        chunk = stream.read(4096)
+        if not chunk:
+            break
+        size += len(chunk)
+        if size > max_bytes:
+            raise subprocess.SubprocessError("gh output exceeded limit")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def gh_token():
+    """`gh auth token`, streamed under a small byte cap and deadline.
+
+    Runs only a system-installed gh (see _trusted_gh), reads stdout
+    incrementally, and kills the child's whole process group if it hangs or
+    produces more than GH_TOKEN_MAX_BYTES."""
+    gh = _trusted_gh()
+    if not gh:
+        return None
+    proc = None
+    token = None
+    try:
+        # bufsize=0 keeps proc.stdout a raw, unbuffered stream so read() returns
+        # exactly what is available instead of blocking to fill a buffer; the
+        # select() deadline in _read_capped_stream is then authoritative.
+        proc = subprocess.Popen(
+            [gh, "auth", "token"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            bufsize=0,
+        )
+        raw = _read_capped_stream(proc.stdout, GH_TOKEN_MAX_BYTES, GH_DEADLINE)
+        proc.wait(timeout=max(0, GH_DEADLINE))
+        token = raw.decode("utf-8", "replace").strip() or None
+    except (OSError, subprocess.SubprocessError):
+        token = None
+    finally:
+        if proc is not None:
+            # Kill the whole group BEFORE reaping the leader: once the leader is
+            # reaped its pgid is gone and orphaned children would survive.
+            _kill_group(proc)
+            try:
+                proc.wait(timeout=1)
+            except (OSError, subprocess.SubprocessError):
+                pass
+            try:
+                proc.stdout.close()
+            except OSError:
+                pass
+    return token
 
 
 def build_headers(token):
@@ -143,8 +238,11 @@ def http_absolute(url, token, timeout, max_bytes=MAX_SUBJECT_BYTES,
 
 
 def http_error_message(error):
+    # Read the error body through the same strict cap as success responses
+    # before parsing it; unbounded json.load(error) must never be used.
     try:
-        body = json.load(error)
+        raw = _read_capped(error, MAX_ERROR_BYTES)
+        body = json.loads(raw)
         message = body.get("message") or ""
     except Exception:
         message = ""
@@ -160,15 +258,8 @@ def resolve_token(args, host):
     if os.environ.get("GITHUB_TOKEN"):
         return os.environ["GITHUB_TOKEN"].strip(), "env"
     # The gh token only matches github.com; a custom --host needs its own token.
-    if host == "api.github.com" and shutil.which("gh"):
-        try:
-            out = subprocess.run(
-                ["gh", "auth", "token"],
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                timeout=args.timeout, check=True,
-            ).stdout.decode("utf-8", "replace").strip()
-        except (subprocess.SubprocessError, OSError):
-            return None, "gh"
+    if host == "api.github.com":
+        out = gh_token()
         if out:
             return out, "gh"
     return None, "none"
@@ -329,7 +420,7 @@ def main():
     signal.alarm(int(deadline))
 
     host = (args.host or "api.github.com").rstrip("/")
-    gh_available = shutil.which("gh") is not None
+    gh_available = _trusted_gh() is not None
     token, source = resolve_token(args, host)
     args.token = token
 
