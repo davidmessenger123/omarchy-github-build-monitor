@@ -193,6 +193,14 @@ account, repo count, rate limit, and whether anyone is signed in at all. The
 QML derives a widget-wide state (running > pending > failure > action-required
 > error > success > neutral), colors the pill, and builds the popup list.
 
+Each request carries the ETag from the previous poll, so a quiet account
+answers `304 Not Modified` — which does not count against the rate limit — and
+the widget reuses the last good snapshot (`__unchanged` / `__notifications`
+lines) instead of re-rendering it. The ETags and cached account/repo list live
+in `~/.cache/davidjm-github-builds/etags.json`; it is written atomically and
+stores no secrets (the cache is namespaced by a hash of host + token, never the
+token itself), so switching accounts never reuses another account's state.
+
 ## License
 
 MIT — see [`LICENSE`](LICENSE).

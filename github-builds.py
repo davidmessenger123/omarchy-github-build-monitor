@@ -3,9 +3,8 @@
 
 Account mode (default): monitors every repository owned by the GitHub account
 currently logged in on this machine. The account comes from the gh CLI
-(`gh auth token` / `gh api user`); an explicit --token or the GITHUB_TOKEN
-environment variable overrides it. Repos are newest-updated first and capped
-by --max-repos.
+(`gh auth token` / `gh api user`); the GITHUB_TOKEN environment variable
+overrides it. Repos are newest-updated first and capped by --max-repos.
 
 Extra repositories can be monitored alongside the account with one --repo
 argument per repository.
@@ -32,6 +31,7 @@ The gh CLI is used only as the credential store when no token is given.
 """
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -41,6 +41,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -58,6 +59,13 @@ GH_TOKEN_MAX_BYTES = 1024
 GH_DEADLINE = 8
 API_VERSION = "2022-11-28"
 USER_AGENT = "github-notify-center/1.0"
+ETAG_FILE_DIR = os.path.join(".cache", "davidjm-github-builds")
+ETAG_FILE_NAME = "etags.json"
+ETAG_MAX_FILE_BYTES = 128 * 1024
+ETAG_MAX_VALUE_LEN = 512
+CACHE_ITEM_LEN = 512
+TIMEOUT_EXIT = 124
+STATE_LOCK = threading.Lock()
 
 # The gh CLI is the credential source when no explicit token is given, so it is
 # only ever resolved from system-owned directories. User-writable PATH entries
@@ -187,6 +195,87 @@ def build_headers(token):
     return headers
 
 
+# Conditional-request state kept across helper runs so a poll whose data is
+# unchanged costs almost no rate limit (GitHub answers 304, which is free).
+# The file lives under this user's HOME (never a world-writable /tmp path),
+# is only ever written atomically by this script, and stores no secrets: the
+# account identity and repos for reuse on 304 plus ETag values. State is
+# namespaced by a hash of host + token so switching accounts never reuses
+# another account's etags.
+def etag_path():
+    home = os.environ.get("HOME") or ""
+    if not home:
+        return ""
+    return os.path.join(home, ETAG_FILE_DIR, ETAG_FILE_NAME)
+
+
+def etag_namespace(token, host):
+    digest = hashlib.sha256()
+    digest.update(host.encode("utf-8"))
+    if token:
+        digest.update(b"\x00")
+        digest.update(token.encode("utf-8"))
+    return digest.hexdigest()[:16]
+
+
+def read_state(path):
+    state = {"etags": {}, "cache": {}}
+    if not path or not os.path.exists(path):
+        return state
+    try:
+        with open(path, "r") as handle:
+            raw = handle.read(ETAG_MAX_FILE_BYTES + 1)
+        if len(raw) > ETAG_MAX_FILE_BYTES:
+            return state
+        data = json.loads(raw)
+    except (OSError, ValueError):
+        return state
+    etags = data.get("etags") if isinstance(data.get("etags"), dict) else {}
+    cache = data.get("cache") if isinstance(data.get("cache"), dict) else {}
+    for key, value in etags.items():
+        if (isinstance(key, str) and isinstance(value, str)
+                and len(key) <= 256 and len(value) <= ETAG_MAX_VALUE_LEN):
+            state["etags"][key] = value
+    for ns, entry in cache.items():
+        if not isinstance(ns, str) or len(ns) > 128 or not isinstance(entry, dict):
+            continue
+        clean = {}
+        for key, value in entry.items():
+            if not isinstance(key, str) or len(key) > 64:
+                continue
+            if isinstance(value, str):
+                if len(value) <= CACHE_ITEM_LEN:
+                    clean[key] = value
+            elif isinstance(value, list):
+                if (len(value) <= CACHE_ITEM_LEN
+                        and all(isinstance(item, str) and len(item) <= CACHE_ITEM_LEN
+                                for item in value)):
+                    clean[key] = value
+        state["cache"][ns] = clean
+    return state
+
+
+def write_state(path, state):
+    if not path:
+        return
+    directory = os.path.dirname(path)
+    try:
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+    except OSError:
+        return
+    tmp = path + ".tmp"
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as handle:
+            json.dump(state, handle, separators=(",", ":"))
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
 def _read_capped(response, max_bytes):
     """Read a response incrementally, refusing to buffer beyond max_bytes."""
     chunks = []
@@ -203,9 +292,17 @@ def _read_capped(response, max_bytes):
     return b"".join(chunks)
 
 
-def _json(url, headers, timeout, max_bytes):
+def _json(url, headers, timeout, max_bytes, etag=None):
+    if etag:
+        headers = dict(headers)
+        headers["If-None-Match"] = etag
     request = urllib.request.Request(url, headers=headers)
-    response = urllib.request.urlopen(request, timeout=timeout)
+    try:
+        response = urllib.request.urlopen(request, timeout=timeout)
+    except urllib.error.HTTPError as error:
+        if error.code == 304:
+            return None, None
+        raise
     try:
         raw = _read_capped(response, max_bytes)
         body = json.loads(raw)
@@ -214,11 +311,12 @@ def _json(url, headers, timeout, max_bytes):
     return body, response
 
 
-def http_json(host, path, token, timeout, max_bytes=MAX_RESPONSE_BYTES):
+def http_json(host, path, token, timeout, max_bytes=MAX_RESPONSE_BYTES, etag=None):
     """GET host+path as (json body, response). Raises HTTPError on failure.
-    Path is always built from the configured API origin, never from input."""
+    Path is always built from the configured API origin, never from input.
+    A 304 (the body is unchanged since the etag) returns (None, None)."""
     return _json("https://{0}{1}".format(host, path),
-                 build_headers(token), timeout, max_bytes)
+                 build_headers(token), timeout, max_bytes, etag)
 
 
 def http_absolute(url, token, timeout, max_bytes=MAX_SUBJECT_BYTES,
@@ -251,10 +349,12 @@ def http_error_message(error):
     return message[:200]
 
 
-def resolve_token(args, host):
-    """Returns (token, source). source: token / env / gh / none."""
-    if args.token:
-        return args.token, "token"
+def resolve_token(host):
+    """Returns (token, source). source: env / gh / none.
+
+    The token never travels through argv: the widget (or an operator) sets
+    GITHUB_TOKEN and the shell injects it as the child's environment, so it
+    is invisible to `ps`. Without one, the gh CLI is the credential store."""
     if os.environ.get("GITHUB_TOKEN"):
         return os.environ["GITHUB_TOKEN"].strip(), "env"
     # The gh token only matches github.com; a custom --host needs its own token.
@@ -265,20 +365,59 @@ def resolve_token(args, host):
     return None, "none"
 
 
-def account_repos(args, host, token, timeout):
-    """Account login + newest-updated owned repos, capped by --max-repos."""
-    body, response = http_json(host, "/user", token, timeout)
+def rate_of(response):
+    """(limit, remaining) strings from the response headers, if present."""
+    if response is None:
+        return None, None
+    headers = response.headers
+    return headers.get("X-RateLimit-Limit"), headers.get("X-RateLimit-Remaining")
+
+
+def remember_etag(etags, key, response):
+    """Store the response's ETag under key (thread-safe for the pool)."""
+    if response is None or response.headers is None:
+        return
+    value = response.headers.get("ETag") or ""
+    if not value:
+        return
+    with STATE_LOCK:
+        etags["etags"][key] = value[:ETAG_MAX_VALUE_LEN]
+
+
+def account_repos(host, token, timeout, etags, ns):
+    """Account login + newest-updated owned repos, capped by --max-repos.
+
+    Each endpoint carries the stored ETag, so an unchanged account answers
+    304 and the previous login/repo list from the state cache is reused
+    without burning rate limit. Returns (login, repos, limit, remaining)."""
+    cache = (etags or {}).get("cache", {}).get(ns) or {}
+    etag_key = lambda path: ns + "|" + path
+
+    body, response = http_json(host, "/user", token, timeout,
+                               etag=(etags or {}).get("etags", {}).get(etag_key("/user")))
+    if body is None:
+        login = str(cache.get("account") or "")
+        repos = [name for name in cache.get("repos", []) if isinstance(name, str)]
+        return login, repos, cache.get("limit"), cache.get("remaining")
     login = body.get("login")
     if not login:
         raise ValueError("user endpoint returned no login")
+    remember_etag(etags, etag_key("/user"), response)
+
     owner_only = "/user/repos?affiliation=owner&sort=updated&per_page=100"
-    repos_body, _ = http_json(host, owner_only, token, timeout)
-    repos = [
-        repo["full_name"]
-        for repo in repos_body
-        if not repo.get("archived")
-    ][: args.max_repos]
-    return login, repos, response
+    repos_body, repos_response = http_json(host, owner_only, token, timeout,
+                                           etag=(etags or {}).get("etags", {}).get(etag_key(owner_only)))
+    if repos_body is None:
+        repos = [name for name in cache.get("repos", []) if isinstance(name, str)]
+    else:
+        repos = [
+            repo["full_name"]
+            for repo in repos_body
+            if not repo.get("archived")
+        ]
+        remember_etag(etags, etag_key(owner_only), repos_response)
+    limit, remaining = rate_of(response)
+    return login, repos, limit, remaining
 
 
 def web_base(host):
@@ -305,22 +444,34 @@ def notification_html(host, note):
     return "https://{0}/notifications".format(web_base(host))
 
 
-def fetch_notifications(args, host):
-    """Unread notifications for the logged-in account, newest first."""
+def fetch_notifications(args, host, etags, ns):
+    """Unread notifications for the logged-in account, newest first.
+
+    Returns (notifications, changed, error). With a matching ETag the server
+    answers 304 and `changed` is False: nothing about the inbox changed since
+    the last poll, so the widget keeps its previous list instead of churning
+    the popup."""
+    path = "/notifications?per_page=100"
     notifications = []
     try:
-        body, _ = http_json(host, "/notifications?per_page=100", args.token, args.timeout)
+        body, response = http_json(host, path, args.token, args.timeout,
+                                   etag=(etags or {}).get("etags", {}).get(ns + "|" + path))
     except urllib.error.HTTPError as error:
-        return [], http_error_message(error)
+        return [], True, http_error_message(error)
     except urllib.error.URLError as error:
         reason = getattr(error, "reason", None)
-        return [], "network error: {0}".format(reason or error)
+        return [], True, "network error: {0}".format(reason or error)
+
+    if body is None:
+        return [], False, ""
+    remember_etag(etags, ns + "|" + path, response)
 
     for index, note in enumerate(body):
         if not note.get("unread"):
             continue
         subject = note.get("subject") or {}
         notifications.append({
+            "id": str(note.get("id") or ""),
             "reason": note.get("reason") or "subscribed",
             "title": subject.get("title") or "",
             "type": subject.get("type") or "Notification",
@@ -329,7 +480,7 @@ def fetch_notifications(args, host):
             "body": notification_body(args, host, note) if index < MAX_BODY_NOTES else "",
             "updated_at": note.get("updated_at") or "",
         })
-    return notifications, ""
+    return notifications, True, ""
 
 
 def notification_body(args, host, note):
@@ -367,27 +518,41 @@ def _absolute_url(url):
     return ""
 
 
-def fetch_repo(args, host, repo):
+def fetch_repo(args, host, repo, etags, ns):
     path = "/repos/{repo}/actions/runs?per_page={per_page}".format(
         repo=repo, per_page=args.per_page
     )
     try:
-        body, response = http_json(host, path, args.token, args.timeout)
-        headers = response.headers
+        body, response = http_json(host, path, args.token, args.timeout,
+                                   etag=(etags or {}).get("etags", {}).get(ns + "|" + path))
     except urllib.error.HTTPError as error:
         return {"repo": repo, "error": http_error_message(error)}
     except urllib.error.URLError as error:
         reason = getattr(error, "reason", None)
         return {"repo": repo, "error": "network error: {0}".format(reason or error)}
 
+    run_url = "https://{0}{1}".format(host, path)
+    repo_url = "https://{0}/{1}/actions".format(web_base(host), repo)
+    if body is None:
+        # 304: this repo's runs are unchanged since the last poll. Emit the
+        # flag and the (cheap) navigation URLs; the widget reuses its stored
+        # runs so the row is never blanked.
+        return {
+            "repo": repo,
+            "__unchanged": True,
+            "runUrl": run_url,
+            "repoUrl": repo_url,
+        }
+    remember_etag(etags, ns + "|" + path, response)
+
     return {
         "repo": repo,
         "runs": (body.get("workflow_runs") or [])[: args.per_page],
-        "runUrl": "https://{0}{1}".format(host, path),
-        "repoUrl": "https://{0}/{1}/actions".format(web_base(host), repo),
+        "runUrl": run_url,
+        "repoUrl": repo_url,
         "rate": {
-            "limit": headers.get("X-RateLimit-Limit"),
-            "remaining": headers.get("X-RateLimit-Remaining"),
+            "limit": rate_of(response)[0],
+            "remaining": rate_of(response)[1],
         },
     }
 
@@ -402,8 +567,6 @@ def main():
     parser.add_argument("--per-page", type=int, default=6)
     parser.add_argument("--host", default="")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
-    parser.add_argument("--token", default="",
-                        help="explicit token (default: GITHUB_TOKEN, then gh CLI auth)")
     args = parser.parse_args()
 
     if args.per_page < 1:
@@ -416,13 +579,18 @@ def main():
     # helper cannot outlive this bound. The widget keeps its own watchdog too.
     waves = max(1, math.ceil(args.max_repos / MAX_WORKERS))
     deadline = max(30, args.timeout * (waves + 4))
-    signal.signal(signal.SIGALRM, lambda signum, frame: _expire())
+    signal.signal(signal.SIGALRM, _expire)
     signal.alarm(int(deadline))
 
     host = (args.host or "api.github.com").rstrip("/")
     gh_available = _trusted_gh() is not None
-    token, source = resolve_token(args, host)
+    token, source = resolve_token(host)
     args.token = token
+
+    state_path = etag_path()
+    state = read_state(state_path)
+    ns = etag_namespace(token, host)
+    etags = state["etags"]
 
     meta = {
         "mode": "account",
@@ -436,12 +604,21 @@ def main():
         "note": "",
     }
 
+    limit = None
+    remaining = None
     repos = []
     try:
-        login, repos, user_response = account_repos(args, host, token, args.timeout)
+        login, owned, limit, remaining = account_repos(host, token, args.timeout, state, ns)
+        repos = owned[: args.max_repos]
         meta["account"] = login
-        meta["limit"] = user_response.headers.get("X-RateLimit-Limit")
-        meta["remaining"] = user_response.headers.get("X-RateLimit-Remaining")
+        meta["limit"] = limit
+        meta["remaining"] = remaining
+        state.setdefault("cache", {})[ns] = {
+            "account": login,
+            "repos": (repos or [])[: CACHE_ITEM_LEN],
+            "limit": str(limit) if limit is not None else "",
+            "remaining": str(remaining) if remaining is not None else "",
+        }
     except urllib.error.HTTPError as error:
         meta["notLoggedIn"] = error.code in (401, 403)
         meta["note"] = http_error_message(error)
@@ -462,22 +639,29 @@ def main():
         if token:
             # Unread notifications first: parse-order gives the popup the
             # review/mention feedback at the top of the list.
-            notifications, note_error = fetch_notifications(args, host)
-            for note in notifications:
-                note["__notification"] = True
-                sys.stdout.write(json.dumps(note, separators=(",", ":")) + "\n")
+            notifications, changed, note_error = fetch_notifications(args, host, state, ns)
+            if note_error:
+                meta["note"] = note_error
+            if changed:
+                for note in notifications:
+                    note["__notification"] = True
+                    sys.stdout.write(json.dumps(note, separators=(",", ":")) + "\n")
+            else:
+                sys.stdout.write(json.dumps({"__notifications": "unchanged"},
+                                            separators=(",", ":")) + "\n")
 
             with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, max(1, len(repos)))) as pool:
-                results = list(pool.map(
-                    lambda repo: fetch_repo(args, host, repo), repos))
+                results = list(pool.map(lambda repo: fetch_repo(args, host, repo, state, ns),
+                                        repos))
         else:
             results = [{"repo": repo, "error": "no credentials"} for repo in repos]
 
         for result in results:
-            rate = result.pop("rate", None)
-            if rate:
-                meta["limit"] = meta["limit"] or rate["limit"]
-                meta["remaining"] = rate["remaining"]
+            if "__unchanged" not in result:
+                rate = result.pop("rate", None)
+                if rate:
+                    meta["limit"] = meta["limit"] or rate["limit"]
+                    meta["remaining"] = meta["remaining"] or rate["remaining"]
             sys.stdout.write(json.dumps(result, separators=(",", ":")) + "\n")
     elif not meta["notLoggedIn"] and not repos and token:
         meta["note"] = "no repositories found for {0}".format(meta["account"] or "account")
@@ -485,9 +669,20 @@ def main():
     sys.stdout.write(json.dumps({"__meta": meta}, separators=(",", ":")) + "\n")
     sys.stdout.flush()
 
+    state["etags"] = etags
+    write_state(state_path, state)
 
-def _expire():
-    raise SystemExit("poll deadline exceeded")
+
+def _expire(signum, frame):
+    # Surface the deadline with an async-safe write (no interpreter state from
+    # inside a signal handler) and exit hard: os._exit guarantees the helper
+    # cannot keep running after its budget even if a handler or GC wedge stalled
+    # the normal paths.
+    try:
+        os.write(2, b"poll deadline exceeded\n")
+    except OSError:
+        pass
+    os._exit(TIMEOUT_EXIT)
 
 
 if __name__ == "__main__":

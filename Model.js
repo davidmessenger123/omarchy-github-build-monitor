@@ -60,13 +60,22 @@ function clampInt(value, min, max) {
 
 // "owner/name, owner/name" -> ["owner/name", ...]. Malformed entries are
 // dropped so a typo in shell.json can't break every other poll.
+// GitHub-namespaced name shapes: owner is alphanumerics plus hyphens (never
+// leading/trailing or all-hyphen); repo name adds dots/underscores but still
+// starts and ends with an alphanumeric. Anything else — paths, "..", leading
+// separators — is dropped so a typo in shell.json can't break every poll.
+var OWNER_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/
+var REPO_NAME_RE = /^[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9])?$/
+
 function parseRepos(raw) {
   var out = []
   var seen = {}
   var parts = String(raw || "").split(",")
   for (var i = 0; i < parts.length; i++) {
     var repo = String(parts[i] || "").trim()
-    if (!/^[^/\s]+\/[^/\s]+$/.test(repo)) continue
+    var pair = repo.split("/")
+    if (pair.length !== 2) continue
+    if (!OWNER_RE.test(pair[0]) || !REPO_NAME_RE.test(pair[1])) continue
     if (seen[repo]) continue
     seen[repo] = true
     out.push(repo)
@@ -472,19 +481,54 @@ function notificationSubtitle(note) {
   return parts.join(" · ")
 }
 
+// Signature of one notification for change detection: identity is the note id,
+// and updated_at + reason mark a thread that was actually touched (a new
+// comment bumps updated_at, so the same id with a fresh timestamp is a change).
+function noteKey(note) {
+  return String(note && note.id ? note.id : "") + "|" +
+    String(note && note.updated_at ? note.updated_at : "") + "|" +
+    String(note && note.reason ? note.reason : "")
+}
+
+// Did the inbox change between two polls? True when the signature sets differ,
+// including when one is empty and the other is not.
+function notesChanged(a, b) {
+  var count = {}
+  for (var i = 0; i < (b || []).length; i++) {
+    var key = noteKey(b[i])
+    count[key] = (count[key] || 0) + 1
+  }
+  for (var j = 0; j < (a || []).length; j++) {
+    var ak = noteKey(a[j])
+    if (!count[ak]) return true
+    count[ak]--
+  }
+  for (var k in count) if (count[k] !== 0) return true
+  return false
+}
+
 // Parse the helper's raw stdout into widget state in one pass. Handles the
 // account/not-logged-in/zero-repo shapes on top of the per-repo results.
+// `prev` carries the previous ({results, notifications}) so unchanged poll
+// answers (helper 304 lines) can keep the last good snapshot instead of
+// blanking or churning the popup.
 //
 // raw lines:
 //   {"__notification": {"reason", "title", "type", "repo", "html", "updated_at"}}
+//   {"__notifications": "unchanged"}          (304: inbox not re-read)
 //   {"repo": "...", "runs": [...], "repoUrl": "..."}   (or "error")
+//   {"repo": "...", "__unchanged": true}      (304: reuse stored runs)
 //   {"__meta": {mode, account, repoCount, notLoggedIn, ghAvailable,
 //               limit, remaining, note}}
-function deriveState(raw) {
+function deriveState(raw, prev) {
+  var prevResults = (prev && prev.results) || []
+  var prevNotes = (prev && prev.notifications) || []
   var lines = String(raw || "").split("\n")
   var results = []
+  var unchanged = []
   var notifications = []
   var meta = {}
+  var inboxUnchanged = false
   for (var i = 0; i < lines.length; i++) {
     var line = lines[i].trim()
     if (line === "") continue
@@ -492,12 +536,49 @@ function deriveState(raw) {
     try { obj = JSON.parse(line) } catch (e) { continue }
     if (!obj) continue
     if (obj.__meta) meta = obj.__meta
+    else if (obj.__notifications) inboxUnchanged = true
+    else if (obj.__unchanged === true) unchanged.push(obj)
     else if (obj.__notification) {
       // Flat sibling keys ({"__notification": true, "reason": ...}), or
       // nested, depending on producer — normalize both.
       notifications.push(typeof obj.__notification === "object" ? obj.__notification : obj)
     }
     else results.push(obj)
+  }
+
+  // Reuse the previous runs behind a repo the helper answered 304 for, so a
+  // quiet repo never drops out of the list just because nothing changed.
+  var byRepo = {}
+  for (var r = 0; r < prevResults.length; r++) {
+    var old = prevResults[r]
+    if (old && old.repo) byRepo[old.repo] = old
+  }
+  var seenRepo = {}
+  var merged = []
+  for (var u = 0; u < unchanged.length; u++) {
+    var stale = byRepo[unchanged[u].repo]
+    if (!stale || seenRepo[stale.repo]) continue
+    seenRepo[stale.repo] = true
+    merged.push(stale)
+  }
+  for (var m = 0; m < results.length; m++) {
+    if (seenRepo[results[m].repo]) continue
+    seenRepo[results[m].repo] = true
+    merged.push(results[m])
+  }
+  results = merged
+
+  // Diff notifications by id/updated_at: an inbox whose signature did not
+  // change (or which the helper did not re-read) keeps the previous note
+  // objects — same array identity, so nothing below this re-renders.
+  var changed = !inboxUnchanged
+  if (changed) {
+    if (!notesChanged(prevNotes, notifications)) {
+      changed = false
+      notifications = prevNotes
+    }
+  } else {
+    notifications = prevNotes
   }
 
   var notLoggedIn = meta.notLoggedIn === true
@@ -523,6 +604,7 @@ function deriveState(raw) {
         : "gh CLI not found - install it to sign in",
       rows: [],
       rateStatus: rateStatus,
+      notesChanged: changed,
       notLoggedIn: true,
       ghAvailable: ghAvailable,
       account: account,
@@ -570,6 +652,7 @@ function deriveState(raw) {
     statusText: statusText,
     rows: rows,
     rateStatus: rateStatus,
+    notesChanged: changed,
     notLoggedIn: false,
     ghAvailable: ghAvailable,
     account: account,
@@ -679,6 +762,7 @@ if (typeof module !== "undefined" && module.exports) {
     notificationAttribution: notificationAttribution,
     notificationRows: notificationRows,
     repoNotificationRows: repoNotificationRows,
+    notesChanged: notesChanged,
     unconfiguredMessage: unconfiguredMessage,
     STATUS_UNKNOWN: STATUS_UNKNOWN,
     STATUS_LOGIN: STATUS_LOGIN,

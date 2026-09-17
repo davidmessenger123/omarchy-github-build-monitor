@@ -51,6 +51,7 @@ BarWidget {
   property var notifications: []        // unread notifications from the account
   property int unreadCount: 0           // total unread notifications shown
   property int actionableCount: 0       // ...that need your review/response
+  property bool notesChanged: false     // inbox signature changed last poll
 
   // Clicking a repo row switches the list to that repo's notifications;
   // click it again (or the "close this view" row) to see everything again.
@@ -164,7 +165,10 @@ BarWidget {
   function ingest(raw) {
     watchdog.stop()
     root.fetchBusy = false
-    var state = Model.deriveState(raw)
+    var state = Model.deriveState(raw, {
+      results: root.repoResults,
+      notifications: root.notifications
+    })
     root.repoResults = state.results
     root.overall = state.overall
     root.statusText = state.statusText
@@ -177,6 +181,7 @@ BarWidget {
     root.notifications = state.notifications
     root.unreadCount = state.unreadCount
     root.actionableCount = state.actionableCount
+    root.notesChanged = state.notesChanged
     root.updatedLabel = "Updated " + Model.clockTime(new Date())
   }
 
@@ -249,12 +254,15 @@ BarWidget {
     }
   }
 
+  // Right-click/notification open. The preferred path quotes the URL for the
+  // shell; when the bar has no shellQuote the URL still must never be pasted
+  // unquoted into a shell string, so launch xdg-open by argv instead.
   function shellOpen(url) {
     if (!url) return
     if (root.bar && typeof root.bar.run === "function" && typeof root.bar.shellQuote === "function")
       root.bar.run("xdg-open " + root.bar.shellQuote(url))
-    else if (root.bar && typeof root.bar.run === "function")
-      root.bar.run("xdg-open " + url)
+    else if (typeof Quickshell.execDetached === "function")
+      Quickshell.execDetached(["xdg-open", url])
   }
 
   // ---- bar pill -----------------------------------------------------------
