@@ -567,6 +567,12 @@ def main():
     parser.add_argument("--per-page", type=int, default=6)
     parser.add_argument("--host", default="")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
+    parser.add_argument("--no-etag", action="store_true",
+                        help="ignore stored ETags and force full fetches. Used on "
+                             "the widget's first poll after a restart, when its "
+                             "in-memory run cache is empty: 304 replies that only "
+                             "make sense when the widget holds a previous snapshot "
+                             "would otherwise leave the monitor blank.")
     args = parser.parse_args()
 
     if args.per_page < 1:
@@ -588,7 +594,9 @@ def main():
     args.token = token
 
     state_path = etag_path()
-    state = read_state(state_path)
+    # With --no-etag the disk state is ignored entirely, so nothing can answer
+    # 304 on this run; responses are full and fresh ETags are stored again.
+    state = read_state(state_path) if not args.no_etag else {"etags": {}, "cache": {}}
     ns = etag_namespace(token, host)
     etags = state["etags"]
 

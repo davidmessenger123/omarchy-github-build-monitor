@@ -125,6 +125,11 @@ BarWidget {
       "--per-page", String(perPage),
       "--max-repos", String(maxRepos),
       "--timeout", "12"]
+    // Nothing cached in memory yet (fresh widget after a shell restart): the
+    // helper's stored ETags are outliving our run snapshot, so a 304 reply
+    // would leave the monitor blank. Force one full fetch; everything after
+    // this poll can go back to cheap 304 polls.
+    if (root.repoResults.length === 0) command.push("--no-etag")
     if (apiHost !== "") { command.push("--host"); command.push(apiHost) }
     for (var i = 0; i < repos.length; i++) {
       command.push("--repo"); command.push(repos[i])
