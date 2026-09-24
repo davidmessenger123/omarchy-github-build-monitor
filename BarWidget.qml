@@ -21,7 +21,8 @@ import "Model.js" as Model
 //     "maxRepos": 30,
 //     "token": "",
 //     "host": "",
-//     "interval": 60,
+//     "interval": 60,               // calm poll preference (s); active pipelines poll at 20s
+
 //     "perPage": 6
 //   }
 BarWidget {
@@ -44,20 +45,27 @@ BarWidget {
   property string rateStatus: ""
   property string updatedLabel: ""
   property bool fetchBusy: false
-  property string account: ""           // login of the watched GitHub account
-  property int repoCount: 0             // account repos monitored
-  property bool notLoggedIn: false      // no usable credentials -> sign in flow
+  property int fetchGeneration: 0
+  property int activeGeneration: 0
+  property int watchdogGeneration: -1
+  property string activeSession: ""
+  property bool refreshQueued: false
+  property string activeConfigKey: ""
+  property string account: ""
+  property string webOrigin: Model.DEFAULT_WEB_ORIGIN
+  property int repoCount: 0
+  property bool notLoggedIn: false
   property bool ghAvailable: false      // is the gh CLI installed?
   property var notifications: []        // unread notifications from the account
   property int unreadCount: 0           // total unread notifications shown
   property int actionableCount: 0       // ...that need your review/response
-  property bool notesChanged: false     // inbox signature changed last poll
+  property bool notesChanged: false
 
   // Clicking a repo row switches the list to that repo's notifications;
   // click it again (or the "close this view" row) to see everything again.
   readonly property var popupRows: root.selectedRepo === ""
     ? root.derivedRows
-    : Model.repoNotificationRows(root.selectedRepo, root.notifications, root.repoResults)
+    : Model.repoNotificationRows(root.selectedRepo, root.notifications, root.repoResults, root.webOrigin)
 
   // The plain-G mark is drawn smaller than the solid bar glyphs at the same
   // pixel size, so we measure its painted height against a reference glyph
@@ -99,59 +107,113 @@ BarWidget {
 
   // ---- polling ------------------------------------------------------------
 
-  function refresh() {
-    if (root.fetchBusy) return
+  function queueRefresh() {
+    if (root.refreshQueued) return
+    root.refreshQueued = true
+    Qt.callLater(function() {
+      root.refreshQueued = false
+      root.refresh()
+    })
+  }
 
-    // Re-read every setting fresh: shell.json can be edited at any time and
-    // the host only updates this widget's `settings` in place.
+  function refresh() {
+    var configuredHost = String(setting("host", "") || "")
+    var apiHost = Model.canonicalApiHost(configuredHost)
+    if (configuredHost !== "" && apiHost === "") {
+      if (fetcherLoader.item) {
+        fetcherLoader.item.ingested = true
+        fetcherLoader.item.running = false
+      }
+      fetcherLoader.active = false
+      watchdog.stop()
+      root.fetchGeneration++
+      root.activeGeneration = -1
+      root.activeSession = ""
+      root.activeConfigKey = ""
+      root.fetchBusy = false
+      root.overall = "error"
+      root.statusText = "Invalid API host"
+      return
+    }
     var repos = Model.parseRepos(setting("repos", ""))
     var maxRepos = Model.clampInt(setting("maxRepos", 30), 1, 100)
-    var apiHost = setting("host", "")
-    var githubToken = setting("token", "")
+    var rawToken = String(setting("token", "") || "")
+    var githubToken = rawToken.trim()
+    if (githubToken.length > 1024 || /[\u0000-\u001f\u007f]/.test(githubToken)) githubToken = ""
     var perPage = Model.clampInt(setting("perPage", 6), 1, 30)
+    var inheritedToken = ""
+    if (typeof Quickshell.env === "function") {
+      var environmentToken = Quickshell.env("GITHUB_TOKEN")
+      if (environmentToken !== null && environmentToken !== undefined)
+        inheritedToken = String(environmentToken).trim()
+    }
+    if (inheritedToken.length > 1024 || /[\u0000-\u001f\u007f]/.test(inheritedToken)) inheritedToken = ""
+    var childEnvironment = {}
+    if (githubToken !== "" && githubToken.length <= 1024) childEnvironment.GITHUB_TOKEN = githubToken
+    else if (Model.isGitHubApiHost(apiHost) && inheritedToken.length <= 1024 && inheritedToken !== "")
+      childEnvironment.GITHUB_TOKEN = inheritedToken
+    var configKey = [apiHost, githubToken, perPage, maxRepos, repos.join(",")].join("|")
+    if (root.fetchBusy && root.activeConfigKey === configKey) return
+    if (root.fetchBusy && fetcherLoader.item) {
+      fetcherLoader.item.ingested = true
+      fetcherLoader.item.running = false
+      fetcherLoader.active = false
+      root.fetchBusy = false
+    }
 
-    // Account mode by default: the helper resolves the logged-in GitHub
-    // account itself (gh CLI, GITHUB_TOKEN, or the `token` setting) and
-    // monitors that account's repositories. Extra --repo flags add repos
-    // that don't belong to the account (organization-owned, a coworker's…).
-    //
-    // Security: the interpreter is an absolute path and the child runs with a
-    // cleared environment so nothing from the shell process bleeds in. The
-    // token (if configured) is injected as the GITHUB_TOKEN environment
-    // variable — never on the process argv, where it would be visible to
-    // every local user in `ps`.
-    var command = ["/usr/bin/python3", "-E",
-      Model.scriptPath(Qt.resolvedUrl("github-builds.py")),
+    var generation = root.fetchGeneration + 1
+    root.fetchGeneration = generation
+    root.activeGeneration = generation
+    root.activeSession = String(Date.now()) + "-" + String(generation)
+    root.activeConfigKey = configKey
+    root.webOrigin = Model.normalizeWebOrigin("https://" + (apiHost === "api.github.com" ? "github.com" : (apiHost.indexOf("api.") === 0 ? apiHost.slice(4) : apiHost)))
+    var helperPath = Model.scriptPath(Qt.resolvedUrl("github-builds.py"))
+    if (helperPath === "") {
+      root.fetchBusy = false
+      root.overall = "error"
+      root.statusText = "Monitor helper is unavailable"
+      return
+    }
+    var command = ["/usr/bin/python3", "-I", helperPath,
       "--per-page", String(perPage),
       "--max-repos", String(maxRepos),
-      "--timeout", "12"]
-    // Nothing cached in memory yet (fresh widget after a shell restart): the
-    // helper's stored ETags are outliving our run snapshot, so a 304 reply
-    // would leave the monitor blank. Force one full fetch; everything after
-    // this poll can go back to cheap 304 polls.
+      "--timeout", "12",
+      "--session", root.activeSession]
     if (root.repoResults.length === 0) command.push("--no-etag")
-    if (apiHost !== "") { command.push("--host"); command.push(apiHost) }
+    if (configuredHost !== "") { command.push("--host"); command.push(apiHost) }
     for (var i = 0; i < repos.length; i++) {
       command.push("--repo"); command.push(repos[i])
     }
 
+    fetcherLoader.active = true
+    var fetcher = fetcherLoader.item
+    if (!fetcher) {
+      root.fetchBusy = false
+      return
+    }
+    fetcher.generation = generation
+    fetcher.session = root.activeSession
+    fetcher.ingested = false
+    fetcher.overflow = false
+    fetcher.output = ""
     fetcher.clearEnvironment = true
-    fetcher.environment = githubToken !== "" ? { "GITHUB_TOKEN": githubToken } : {}
+    fetcher.environment = childEnvironment
     fetcher.command = command
     root.fetchBusy = true
     fetcher.running = true
-
-    // Independent watchdog: this shell process is the final authority on how
-    // long a poll may run. If the helper outlives its deadline it is stopped
-    // and the pill flips to an error instead of hanging the recurring timer.
-    watchdog.interval = root.pollDeadlineMs(maxRepos)
+    root.watchdogGeneration = generation
+    watchdog.interval = root.pollDeadlineMs(maxRepos, repos.length, perPage)
     watchdog.start()
   }
 
   // Mirror of the helper's own SIGALRM deadline (timeout 12s, 8 workers).
-  function pollDeadlineMs(maxRepos) {
-    var waves = Math.max(1, Math.ceil(maxRepos / 8))
-    return Math.max(30, 12 * (waves + 4)) * 1000
+  function pollDeadlineMs(maxRepos, extras, perPage) {
+    var totalRepos = Math.min(100, Math.max(1, maxRepos) + Math.max(0, extras || 0))
+    var repoWaves = Math.max(1, Math.ceil(totalRepos / 8))
+    var pageWork = 10
+    var pageFactor = Math.max(1, Math.ceil((perPage || 6) / 30))
+    var work = 2 + pageWork * pageFactor + repoWaves + 1
+    return Math.min(900000, Math.max(30000, (8 + 12 * work + 5) * 1000))
   }
 
   Timer {
@@ -159,27 +221,49 @@ BarWidget {
     interval: 60000
     repeat: false
     onTriggered: {
-      if (!root.fetchBusy) return
+      if (!root.fetchBusy || root.watchdogGeneration !== root.activeGeneration) return
+      var current = fetcherLoader.item
+      if (current) current.running = false
       root.fetchBusy = false
-      fetcher.running = false
+      root.activeGeneration = -1
+      root.activeSession = ""
+      root.activeConfigKey = ""
       root.overall = "error"
       root.statusText = "Poll timed out — the shell aborted the fetch"
     }
   }
 
-  function ingest(raw) {
+  function ingest(raw, generation, session, source) {
+    if (!root.fetchBusy || generation !== root.activeGeneration || session !== root.activeSession) return
+    if (source && source.ingested) return
+    var state = null
+    try {
+      state = Model.deriveState(raw, {
+        results: root.repoResults,
+        notifications: root.notifications
+      }, root.webOrigin)
+    } catch (parseError) {
+      root.failRun(generation, session, source, 1)
+      return
+    }
+    if (!state.hasMeta) {
+      root.failRun(generation, session, source, 1)
+      return
+    }
+    if (state.session !== session) {
+      root.failRun(generation, session, source, 1)
+      return
+    }
+    if (source) source.ingested = true
     watchdog.stop()
     root.fetchBusy = false
-    var state = Model.deriveState(raw, {
-      results: root.repoResults,
-      notifications: root.notifications
-    })
     root.repoResults = state.results
     root.overall = state.overall
     root.statusText = state.statusText
     root.derivedRows = state.rows
     root.rateStatus = state.rateStatus
     root.account = state.account
+    root.webOrigin = state.webOrigin || root.webOrigin
     root.repoCount = state.repoCount
     root.notLoggedIn = state.notLoggedIn
     root.ghAvailable = state.ghAvailable
@@ -188,30 +272,86 @@ BarWidget {
     root.actionableCount = state.actionableCount
     root.notesChanged = state.notesChanged
     root.updatedLabel = "Updated " + Model.clockTime(new Date())
+    root.applyPollInterval()
+  }
+
+  function failRun(generation, session, source, exitCode) {
+    if (!root.fetchBusy || generation !== root.activeGeneration || session !== root.activeSession) return
+    if (source && source.ingested) return
+    if (source) source.ingested = true
+    watchdog.stop()
+    root.fetchBusy = false
+    root.activeGeneration = -1
+    root.activeSession = ""
+    root.activeConfigKey = ""
+    root.overall = "error"
+    root.statusText = "Poll failed — helper exited with code " + String(exitCode)
+  }
+
+  // Adaptive polling: active pipelines need a short interval; calm states can
+  // wait. The shell.json `interval` setting is the calm-side preference, with
+  // a floor of 180s so idle polls do not hammer the API.
+  function pollIntervalMs() {
+    var configured = Model.clampInt(setting("interval", 60), 15, 3600)
+    var busy = root.overall === Model.STATUS_RUNNING ||
+      root.overall === Model.STATUS_PENDING
+    if (busy) return 20 * 1000
+    return Math.max(configured, 180) * 1000
+  }
+
+  function applyPollInterval() {
+    pollTimer.interval = root.pollIntervalMs()
   }
 
   onSettingsChanged: function() {
-    pollTimer.interval = Model.clampInt(setting("interval", 60), 15, 3600) * 1000
-    Qt.callLater(root.refresh)
+    root.applyPollInterval()
+    root.queueRefresh()
   }
 
-  Process {
-    id: fetcher
-    command: []
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.ingest(text)
+  Component {
+    id: fetcherTemplate
+    Process {
+      id: sessionFetcher
+      property int generation: -1
+      property string session: ""
+      property bool ingested: false
+      property bool overflow: false
+      property string output: ""
+      command: []
+      stdout: SplitParser {
+        onRead: function(data) {
+          if (sessionFetcher.overflow) return
+          var value = String(data || "")
+          if (sessionFetcher.output.length + value.length + 1 > Model.MAX_RAW_CHARS) {
+            sessionFetcher.overflow = true
+            sessionFetcher.output = ""
+            sessionFetcher.running = false
+            return
+          }
+          sessionFetcher.output += value + "\n"
+        }
+      }
+      stderr: SplitParser {}
+      onExited: function(exitCode) {
+        if (sessionFetcher.ingested) return
+        if (sessionFetcher.overflow || exitCode !== 0) {
+          root.failRun(sessionFetcher.generation, sessionFetcher.session, sessionFetcher, exitCode)
+          return
+        }
+        root.ingest(sessionFetcher.output, sessionFetcher.generation, sessionFetcher.session, sessionFetcher)
+      }
     }
-    onExited: function(exitCode) {
-      // If the stream already parsed lines this is a no-op. Only a failure
-      // with no usable stdout should flip the widget into its error state.
-      if (root.fetchBusy) root.ingest("")
-    }
+  }
+
+  Loader {
+    id: fetcherLoader
+    active: false
+    sourceComponent: fetcherTemplate
   }
 
   Timer {
     id: pollTimer
-    interval: Model.clampInt(setting("interval", 60), 15, 3600) * 1000
+    interval: 180000
     running: true
     repeat: true
     triggeredOnStart: true
@@ -251,23 +391,24 @@ BarWidget {
   // automatically.
   function loginAction() {
     if (root.ghAvailable) {
-      Quickshell.execDetached(["omarchy-launch-terminal", "gh", "auth", "login"])
+      var apiHost = Model.canonicalApiHost(setting("host", ""))
+      var loginHost = apiHost.indexOf("api.") === 0 ? apiHost.slice(4) : apiHost
+      var command = ["/usr/share/omarchy/bin/omarchy-launch-terminal", "/usr/bin/gh", "auth", "login"]
+      if (loginHost !== "" && loginHost !== "api.github.com" && loginHost !== "github.com")
+        command.push("--hostname", loginHost)
+      Quickshell.execDetached(command)
     } else {
-      Quickshell.execDetached(["omarchy-notification-send",
+      Quickshell.execDetached(["/usr/share/omarchy/bin/omarchy-notification-send",
         "GitHub Notify Center",
         "The gh CLI is missing. Install the github-cli package and sign in, and the monitor will start tracking your account."])
     }
   }
 
-  // Right-click/notification open. The preferred path quotes the URL for the
-  // shell; when the bar has no shellQuote the URL still must never be pasted
-  // unquoted into a shell string, so launch xdg-open by argv instead.
   function shellOpen(url) {
-    if (!url) return
-    if (root.bar && typeof root.bar.run === "function" && typeof root.bar.shellQuote === "function")
-      root.bar.run("xdg-open " + root.bar.shellQuote(url))
-    else if (typeof Quickshell.execDetached === "function")
-      Quickshell.execDetached(["xdg-open", url])
+    var safe = Model.safeWebUrl(url, root.webOrigin)
+    if (!safe) return
+    if (typeof Quickshell.execDetached === "function")
+      Quickshell.execDetached(["/usr/bin/xdg-open", safe])
   }
 
   // ---- bar pill -----------------------------------------------------------
@@ -290,8 +431,8 @@ BarWidget {
       if (buttonCode === Qt.RightButton) root.refresh()
       else if (buttonCode === Qt.MiddleButton) {
         // Unread feedback waiting? Straight to the notifications inbox.
-        if (root.actionableCount > 0) root.shellOpen(Model.githubNotificationsUrl())
-        else if (root.account !== "") root.shellOpen(Model.githubAccountReposUrl(root.account))
+        if (root.actionableCount > 0) root.shellOpen(Model.githubNotificationsUrl(root.webOrigin))
+        else if (root.account !== "") root.shellOpen(Model.githubAccountReposUrl(root.account, root.webOrigin))
         else if (root.repoResults.length > 0) root.shellOpen(root.repoResults[0].repoUrl)
       }
       else root.togglePanel()
@@ -569,7 +710,7 @@ BarWidget {
             bordered: true
             tooltipText: "Open the account's repositories in the browser"
             onClicked: {
-              if (root.account !== "") root.shellOpen(Model.githubAccountReposUrl(root.account))
+              if (root.account !== "") root.shellOpen(Model.githubAccountReposUrl(root.account, root.webOrigin))
               else if (root.repoResults.length > 0 && root.repoResults[0].repoUrl)
                 root.shellOpen(root.repoResults[0].repoUrl)
             }
@@ -615,5 +756,20 @@ BarWidget {
         color: root.highlighted ? root.activeColor : (root.bar ? root.bar.foreground : Color.foreground)
       }
     }
+  }
+
+  Component.onDestruction: {
+    root.fetchGeneration++
+    root.activeGeneration = -1
+    root.activeSession = ""
+    root.refreshQueued = false
+    root.fetchBusy = false
+    if (fetcherLoader.item) {
+      fetcherLoader.item.ingested = true
+      fetcherLoader.item.running = false
+    }
+    fetcherLoader.active = false
+    watchdog.stop()
+    pollTimer.stop()
   }
 }

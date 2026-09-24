@@ -84,10 +84,10 @@ with `omarchy bar move`.
 omarchy plugin remove davidjm.github-build-monitor
 ```
 
-The plugin keeps no state of its own: everything it reads comes from GitHub on
-each poll, and its settings (if any) live only in the entry you put in
-`~/.config/omarchy/shell.json`, which `omarchy plugin remove` leaves untouched
-so a reinstall keeps your configuration.
+The plugin keeps only bounded private ETag/cache state; workflow data is read
+from GitHub on each poll, and settings (if any) live only in the entry you put
+in `~/.config/omarchy/shell.json`, which `omarchy plugin remove` leaves
+untouched so a reinstall keeps your configuration.
 
 ## Configure
 
@@ -127,6 +127,12 @@ The shell hot-reloads `shell.json` on save.
 | `interval` | integer | `60` | Poll interval in seconds (15–3600). |
 | `perPage` | integer | `6` | Workflow runs listed per repository (1–30). |
 
+The helper enforces hard limits regardless of settings: at most 100 combined
+account and extra repositories, 100 unread notifications, 10 notification body
+lookups when explicitly enabled, 100 workflow runs per repository, 10 account
+repository pages, and 8 MiB of JSON output. Extra repository names are
+validated and deduplicated before any API request is made.
+
 ## Rate limits
 
 Signed in through `gh` the API limit is 5,000 requests/hour. A 1-minute poll
@@ -143,17 +149,18 @@ GITHUB_TOKEN=ghp_xxx omarchy restart shell
 ```
 
 If you put it in the `token` setting it is stored in plain text in
-`~/.config/omarchy/shell.json`. Either way the widget hands it to the helper
-as an **environment variable** (`GITHUB_TOKEN`) on a cleared child environment
-— never on the process command line, so it is not readable from `ps`. Prefer
-the `gh` login if you share the config file.
+`~/.config/omarchy/shell.json`. The widget explicitly forwards that value as
+an environment variable on a cleared child environment; an inherited
+`GITHUB_TOKEN` is forwarded only when the configured API origin is exactly
+`api.github.com`, never for an Enterprise host. Prefer the `gh` login if you
+share the config file.
 
 ## Security
 
 The helper is designed to stay free of common credential-exposure and
 resource-bound traps:
 
-- The widget launches it as `/usr/bin/python3 -E` with a **cleared
+- The widget launches it as `/usr/bin/python3 -I` with a **cleared
   environment**, so nothing (PATH hijacks, inherited variables) bleeds into
   the child; the interpreter itself is an absolute path.
 - Any configured token is delivered via the `GITHUB_TOKEN` **environment
@@ -165,18 +172,31 @@ resource-bound traps:
   can never be used to mint the credential. Its output is streamed under a
   1 KiB cap and an 8-second deadline, and the child's whole process group is
   killed if it misbehaves or is left dangling.
+- Links opened by the widget are validated as HTTPS URLs on the configured
+  Enterprise web origin before `xdg-open`; generated fallbacks use that origin
+  rather than hard-coded `github.com` addresses.
 - Credentials are attached **only to the configured API origin**
-  (`api.github.com` by default, or your `host` setting). When the helper
-  follows a notification's `subject.url` to read thread text, the URL must be
-  `https` on exactly that host or it is refused — a hostile URL can never
-  receive the Bearer token.
+  (`api.github.com` by default, or your `host` setting). API hosts are
+  canonicalized and userinfo, paths, non-HTTPS URLs, and cross-origin redirects
+  are refused; a same-origin redirect is the only redirect that can retain the
+  Bearer header. When the helper follows a notification's `subject.url` to read
+  thread text, the URL must be `https` on exactly that origin.
 - Every response is read **incrementally and capped** (4 MiB default, 512 KiB
-  for subject bodies, 64 KiB for HTTP error bodies), and arrays are sliced to
-  the requested page sizes, so a malformed or hostile payload cannot balloon
-  memory.
-- There is a **whole-process deadline**: the helper arms a SIGALRM wall clock
-  and the shell process keeps an independent watchdog that stops the child and
-  surfaces a timeout instead of hanging the recurring poll.
+  for subject bodies, 64 KiB for HTTP error bodies), repository and notification
+  arrays are capped, and total stdout is capped at 8 MiB.
+- Account repositories are paginated, with at most 100 repositories in the
+  combined account-plus-extras set. The account setting and extra repository
+  list are both bounded; malformed JSON schemas become an error result rather
+  than an unbounded object.
+- ETags and the small account/repository cache are namespaced by a hash of the
+  canonical API origin and credential, bounded, expired, and written through a
+  mode-0600 random temporary file with `O_NOFOLLOW` and ownership/type/size
+  checks. Cache values are rejected when oversized rather than silently
+  truncated.
+- There is a **whole-process deadline** calculated from repository waves,
+  pagination, notification work, optional body fetches, and the credential
+  lookup. The shell process keeps an independent generation/session-guarded
+  watchdog so late output cannot replace a newer poll.
 
 This is a best-effort hardening, not an audit.
 
@@ -194,12 +214,12 @@ QML derives a widget-wide state (running > pending > failure > action-required
 > error > success > neutral), colors the pill, and builds the popup list.
 
 Each request carries the ETag from the previous poll, so a quiet account
-answers `304 Not Modified` — which does not count against the rate limit — and
-the widget reuses the last good snapshot (`__unchanged` / `__notifications`
-lines) instead of re-rendering it. The ETags and cached account/repo list live
-in `~/.cache/davidjm-github-builds/etags.json`; it is written atomically and
-stores no secrets (the cache is namespaced by a hash of host + token, never the
-token itself), so switching accounts never reuses another account's state.
+answers `304 Not Modified`. The QML reuses the previous good snapshot for
+`__unchanged` and `__notifications` lines instead of re-rendering it. The helper
+stores only bounded ETags and account/repository metadata under the user's
+private cache. Cache namespaces include the canonical API origin and a one-way
+credential hash, never the credential itself. The first widget poll forces a
+full response so a shell restart cannot display an empty monitor.
 
 ## License
 
