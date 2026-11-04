@@ -31,35 +31,34 @@ BarWidget {
 
   // ---- configuration ------------------------------------------------------
 
-  // Settings are read fresh on every refresh (see refresh/onSettingsChanged)
-  // because the shell updates this widget's `settings` in place when
-  // shell.json changes; properties bound once at construction would go stale.
+  // The widget pushes its settings to the shared service whenever shell.json
+  // changes; the service owns the poller and the helper.
 
   // ---- state --------------------------------------------------------------
 
-  property var repoResults: []          // [{repo, error?, runs?, runUrl?}]
-  property string overall: Model.STATUS_UNKNOWN
-  property string statusText: "Checking GitHub account…"
-  property var derivedRows: []          // full popup list from the last fetch
+  // The shared service owns the poller, the helper and the ETag cache. The
+  // widget is instantiated once per monitor, so this keeps API traffic and
+  // JSON parsing to one instance per shell.
+  readonly property var svc: bar && bar.shell ? bar.shell.serviceFor(root.moduleName) : null
+
+  readonly property var repoResults: root.svc && root.svc.repoResults ? root.svc.repoResults : []
+  readonly property string overall: root.svc ? root.svc.overall : Model.STATUS_UNKNOWN
+  readonly property string statusText: root.svc ? root.svc.statusText : "Checking GitHub account…"
+  readonly property var derivedRows: root.svc && root.svc.derivedRows ? root.svc.derivedRows : []
+  readonly property string rateStatus: root.svc ? root.svc.rateStatus : ""
+  readonly property string updatedLabel: root.svc ? root.svc.updatedLabel : ""
+  readonly property bool fetchBusy: root.svc ? root.svc.fetchBusy : false
+  readonly property string account: root.svc ? root.svc.account : ""
+  readonly property string webOrigin: root.svc ? root.svc.webOrigin : Model.DEFAULT_WEB_ORIGIN
+  readonly property int repoCount: root.svc ? root.svc.repoCount : 0
+  readonly property bool notLoggedIn: root.svc ? root.svc.notLoggedIn : false
+  readonly property bool ghAvailable: root.svc ? root.svc.ghAvailable : false
+  readonly property var notifications: root.svc && root.svc.notifications ? root.svc.notifications : []
+  readonly property int unreadCount: root.svc ? root.svc.unreadCount : 0
+  readonly property int actionableCount: root.svc ? root.svc.actionableCount : 0
+  readonly property bool notesChanged: root.svc ? root.svc.notesChanged : false
+  readonly property string host: root.svc ? root.svc.host : ""
   property string selectedRepo: ""      // repo whose notifications are shown
-  property string rateStatus: ""
-  property string updatedLabel: ""
-  property bool fetchBusy: false
-  property int fetchGeneration: 0
-  property int activeGeneration: 0
-  property int watchdogGeneration: -1
-  property string activeSession: ""
-  property bool refreshQueued: false
-  property string activeConfigKey: ""
-  property string account: ""
-  property string webOrigin: Model.DEFAULT_WEB_ORIGIN
-  property int repoCount: 0
-  property bool notLoggedIn: false
-  property bool ghAvailable: false      // is the gh CLI installed?
-  property var notifications: []        // unread notifications from the account
-  property int unreadCount: 0           // total unread notifications shown
-  property int actionableCount: 0       // ...that need your review/response
-  property bool notesChanged: false
 
   // Clicking a repo row switches the list to that repo's notifications;
   // click it again (or the "close this view" row) to see everything again.
@@ -107,256 +106,24 @@ BarWidget {
 
   // ---- polling ------------------------------------------------------------
 
-  function queueRefresh() {
-    if (root.refreshQueued) return
-    root.refreshQueued = true
-    Qt.callLater(function() {
-      root.refreshQueued = false
-      root.refresh()
+  function applySettings() {
+    if (!root.svc) return
+    root.svc.configure({
+      "repos": setting("repos", ""),
+      "maxRepos": setting("maxRepos", 30),
+      "token": setting("token", ""),
+      "host": setting("host", ""),
+      "interval": setting("interval", 60),
+      "perPage": setting("perPage", 6)
     })
   }
 
   function refresh() {
-    var configuredHost = String(setting("host", "") || "")
-    var apiHost = Model.canonicalApiHost(configuredHost)
-    if (configuredHost !== "" && apiHost === "") {
-      if (fetcherLoader.item) {
-        fetcherLoader.item.ingested = true
-        fetcherLoader.item.running = false
-      }
-      fetcherLoader.active = false
-      watchdog.stop()
-      root.fetchGeneration++
-      root.activeGeneration = -1
-      root.activeSession = ""
-      root.activeConfigKey = ""
-      root.fetchBusy = false
-      root.overall = "error"
-      root.statusText = "Invalid API host"
-      return
-    }
-    var repos = Model.parseRepos(setting("repos", ""))
-    var maxRepos = Model.clampInt(setting("maxRepos", 30), 1, 100)
-    var rawToken = String(setting("token", "") || "")
-    var githubToken = rawToken.trim()
-    if (githubToken.length > 1024 || /[\u0000-\u001f\u007f]/.test(githubToken)) githubToken = ""
-    var perPage = Model.clampInt(setting("perPage", 6), 1, 30)
-    var inheritedToken = ""
-    if (typeof Quickshell.env === "function") {
-      var environmentToken = Quickshell.env("GITHUB_TOKEN")
-      if (environmentToken !== null && environmentToken !== undefined)
-        inheritedToken = String(environmentToken).trim()
-    }
-    if (inheritedToken.length > 1024 || /[\u0000-\u001f\u007f]/.test(inheritedToken)) inheritedToken = ""
-    var childEnvironment = {}
-    if (githubToken !== "" && githubToken.length <= 1024) childEnvironment.GITHUB_TOKEN = githubToken
-    else if (Model.isGitHubApiHost(apiHost) && inheritedToken.length <= 1024 && inheritedToken !== "")
-      childEnvironment.GITHUB_TOKEN = inheritedToken
-    var configKey = [apiHost, githubToken, perPage, maxRepos, repos.join(",")].join("|")
-    if (root.fetchBusy && root.activeConfigKey === configKey) return
-    if (root.fetchBusy && fetcherLoader.item) {
-      fetcherLoader.item.ingested = true
-      fetcherLoader.item.running = false
-      fetcherLoader.active = false
-      root.fetchBusy = false
-    }
-
-    var generation = root.fetchGeneration + 1
-    root.fetchGeneration = generation
-    root.activeGeneration = generation
-    root.activeSession = String(Date.now()) + "-" + String(generation)
-    root.activeConfigKey = configKey
-    root.webOrigin = Model.normalizeWebOrigin("https://" + (apiHost === "api.github.com" ? "github.com" : (apiHost.indexOf("api.") === 0 ? apiHost.slice(4) : apiHost)))
-    var helperPath = Model.scriptPath(Qt.resolvedUrl("github-builds.py"))
-    if (helperPath === "") {
-      root.fetchBusy = false
-      root.overall = "error"
-      root.statusText = "Monitor helper is unavailable"
-      return
-    }
-    var command = ["/usr/bin/python3", "-I", helperPath,
-      "--per-page", String(perPage),
-      "--max-repos", String(maxRepos),
-      "--timeout", "12",
-      "--session", root.activeSession]
-    if (root.repoResults.length === 0) command.push("--no-etag")
-    if (configuredHost !== "") { command.push("--host"); command.push(apiHost) }
-    for (var i = 0; i < repos.length; i++) {
-      command.push("--repo"); command.push(repos[i])
-    }
-
-    fetcherLoader.active = true
-    var fetcher = fetcherLoader.item
-    if (!fetcher) {
-      root.fetchBusy = false
-      return
-    }
-    fetcher.generation = generation
-    fetcher.session = root.activeSession
-    fetcher.ingested = false
-    fetcher.overflow = false
-    fetcher.output = ""
-    fetcher.clearEnvironment = true
-    fetcher.environment = childEnvironment
-    fetcher.command = command
-    root.fetchBusy = true
-    fetcher.running = true
-    root.watchdogGeneration = generation
-    watchdog.interval = root.pollDeadlineMs(maxRepos, repos.length, perPage)
-    watchdog.start()
+    if (root.svc) root.svc.refresh()
   }
 
-  // Mirror of the helper's own SIGALRM deadline (timeout 12s, 8 workers).
-  function pollDeadlineMs(maxRepos, extras, perPage) {
-    var totalRepos = Math.min(100, Math.max(1, maxRepos) + Math.max(0, extras || 0))
-    var repoWaves = Math.max(1, Math.ceil(totalRepos / 8))
-    var pageWork = 10
-    var pageFactor = Math.max(1, Math.ceil((perPage || 6) / 30))
-    var work = 2 + pageWork * pageFactor + repoWaves + 1
-    return Math.min(900000, Math.max(30000, (8 + 12 * work + 5) * 1000))
-  }
-
-  Timer {
-    id: watchdog
-    interval: 60000
-    repeat: false
-    onTriggered: {
-      if (!root.fetchBusy || root.watchdogGeneration !== root.activeGeneration) return
-      var current = fetcherLoader.item
-      if (current) current.running = false
-      root.fetchBusy = false
-      root.activeGeneration = -1
-      root.activeSession = ""
-      root.activeConfigKey = ""
-      root.overall = "error"
-      root.statusText = "Poll timed out — the shell aborted the fetch"
-    }
-  }
-
-  function ingest(raw, generation, session, source) {
-    if (!root.fetchBusy || generation !== root.activeGeneration || session !== root.activeSession) return
-    if (source && source.ingested) return
-    var state = null
-    try {
-      state = Model.deriveState(raw, {
-        results: root.repoResults,
-        notifications: root.notifications
-      }, root.webOrigin)
-    } catch (parseError) {
-      root.failRun(generation, session, source, 1)
-      return
-    }
-    if (!state.hasMeta) {
-      root.failRun(generation, session, source, 1)
-      return
-    }
-    if (state.session !== session) {
-      root.failRun(generation, session, source, 1)
-      return
-    }
-    if (source) source.ingested = true
-    watchdog.stop()
-    root.fetchBusy = false
-    root.repoResults = state.results
-    root.overall = state.overall
-    root.statusText = state.statusText
-    root.derivedRows = state.rows
-    root.rateStatus = state.rateStatus
-    root.account = state.account
-    root.webOrigin = state.webOrigin || root.webOrigin
-    root.repoCount = state.repoCount
-    root.notLoggedIn = state.notLoggedIn
-    root.ghAvailable = state.ghAvailable
-    root.notifications = state.notifications
-    root.unreadCount = state.unreadCount
-    root.actionableCount = state.actionableCount
-    root.notesChanged = state.notesChanged
-    root.updatedLabel = "Updated " + Model.clockTime(new Date())
-    root.applyPollInterval()
-  }
-
-  function failRun(generation, session, source, exitCode) {
-    if (!root.fetchBusy || generation !== root.activeGeneration || session !== root.activeSession) return
-    if (source && source.ingested) return
-    if (source) source.ingested = true
-    watchdog.stop()
-    root.fetchBusy = false
-    root.activeGeneration = -1
-    root.activeSession = ""
-    root.activeConfigKey = ""
-    root.overall = "error"
-    root.statusText = "Poll failed — helper exited with code " + String(exitCode)
-  }
-
-  // Adaptive polling: active pipelines need a short interval; calm states can
-  // wait. The shell.json `interval` setting is the calm-side preference, with
-  // a floor of 180s so idle polls do not hammer the API.
-  function pollIntervalMs() {
-    var configured = Model.clampInt(setting("interval", 60), 15, 3600)
-    var busy = root.overall === Model.STATUS_RUNNING ||
-      root.overall === Model.STATUS_PENDING
-    if (busy) return 20 * 1000
-    return Math.max(configured, 180) * 1000
-  }
-
-  function applyPollInterval() {
-    pollTimer.interval = root.pollIntervalMs()
-  }
-
-  onSettingsChanged: function() {
-    root.applyPollInterval()
-    root.queueRefresh()
-  }
-
-  Component {
-    id: fetcherTemplate
-    Process {
-      id: sessionFetcher
-      property int generation: -1
-      property string session: ""
-      property bool ingested: false
-      property bool overflow: false
-      property string output: ""
-      command: []
-      stdout: SplitParser {
-        onRead: function(data) {
-          if (sessionFetcher.overflow) return
-          var value = String(data || "")
-          if (sessionFetcher.output.length + value.length + 1 > Model.MAX_RAW_CHARS) {
-            sessionFetcher.overflow = true
-            sessionFetcher.output = ""
-            sessionFetcher.running = false
-            return
-          }
-          sessionFetcher.output += value + "\n"
-        }
-      }
-      stderr: SplitParser {}
-      onExited: function(exitCode) {
-        if (sessionFetcher.ingested) return
-        if (sessionFetcher.overflow || exitCode !== 0) {
-          root.failRun(sessionFetcher.generation, sessionFetcher.session, sessionFetcher, exitCode)
-          return
-        }
-        root.ingest(sessionFetcher.output, sessionFetcher.generation, sessionFetcher.session, sessionFetcher)
-      }
-    }
-  }
-
-  Loader {
-    id: fetcherLoader
-    active: false
-    sourceComponent: fetcherTemplate
-  }
-
-  Timer {
-    id: pollTimer
-    interval: 180000
-    running: true
-    repeat: true
-    triggeredOnStart: true
-    onTriggered: root.refresh()
-  }
+  onSettingsChanged: root.applySettings()
+  Component.onCompleted: root.applySettings()
 
   // ---- IPC (refresh / open from hotkeys and omarchy-shell) ----------------
 
@@ -391,7 +158,7 @@ BarWidget {
   // automatically.
   function loginAction() {
     if (root.ghAvailable) {
-      var apiHost = Model.canonicalApiHost(setting("host", ""))
+      var apiHost = Model.canonicalApiHost(root.host)
       var loginHost = apiHost.indexOf("api.") === 0 ? apiHost.slice(4) : apiHost
       var command = ["/usr/share/omarchy/bin/omarchy-launch-terminal", "/usr/bin/gh", "auth", "login"]
       if (loginHost !== "" && loginHost !== "api.github.com" && loginHost !== "github.com")
@@ -758,18 +525,4 @@ BarWidget {
     }
   }
 
-  Component.onDestruction: {
-    root.fetchGeneration++
-    root.activeGeneration = -1
-    root.activeSession = ""
-    root.refreshQueued = false
-    root.fetchBusy = false
-    if (fetcherLoader.item) {
-      fetcherLoader.item.ingested = true
-      fetcherLoader.item.running = false
-    }
-    fetcherLoader.active = false
-    watchdog.stop()
-    pollTimer.stop()
-  }
 }

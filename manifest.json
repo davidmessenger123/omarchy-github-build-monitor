@@ -3,15 +3,18 @@
   "schemaVersion": 1,
   "id": "davidjm.github-build-monitor",
   "name": "GitHub Notify Center",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "David JM",
   "license": "MIT",
   "repository": "https://github.com/davidmessenger123/omarchy-github-build-monitor",
   "description": "Real-time GitHub Actions status for every repository owned by the logged-in GitHub account, shown in the Omarchy bar.",
   "kinds": [
+    "service",
     "bar-widget"
   ],
+  "keepLoaded": true,
   "entryPoints": {
+    "service": "Service.qml",
     "barWidget": "BarWidget.qml"
   },
   "barWidget": {
