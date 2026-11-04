@@ -3,7 +3,7 @@
   "schemaVersion": 1,
   "id": "davidjm.github-build-monitor",
   "name": "GitHub Notify Center",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "author": "David JM",
   "license": "MIT",
   "repository": "https://github.com/davidmessenger123/omarchy-github-build-monitor",
@@ -29,7 +29,8 @@
       "token": "",
       "host": "",
       "interval": 60,
-      "perPage": 6
+      "perPage": 6,
+      "notifyBuilds": true
     },
     "schema": [
       {
@@ -68,6 +69,13 @@
         "type": "integer",
         "label": "Runs per repository",
         "defaultValue": 6
+      },
+      {
+        "key": "notifyBuilds",
+        "type": "bool",
+        "label": "Desktop build notifications",
+        "defaultValue": true,
+        "description": "Send a desktop notification when a repository's latest workflow fails, needs attention, or recovers after a failure. Clicking the notification opens the run."
       }
     ]
   }

@@ -55,3 +55,29 @@ assert.strictEqual(Model.githubActionsUrl("owner/repo", "http://evil.example"), 
 assert.strictEqual(Model.safeWebUrl("https://ghe.example.test/a#fragment", "https://ghe.example.test"), "")
 
 console.log("Model.js tests passed")
+
+const failureNotice = Model.buildNotifications(
+  [{ repo: "owner/repo", runs: [{ status: "completed", conclusion: "success" }] }],
+  [{
+    repo: "owner/repo",
+    runUrl: "https://github.com/owner/repo/actions/runs/2",
+    runs: [{ name: "CI", run_number: 2, status: "completed", conclusion: "failure", head_branch: "main" }]
+  }]
+)
+assert.strictEqual(failureNotice.length, 1)
+assert.strictEqual(failureNotice[0].title, "CI failed: owner/repo")
+assert.strictEqual(failureNotice[0].url, "https://github.com/owner/repo/actions/runs/2")
+assert.strictEqual(failureNotice[0].body, "CI #2 on main")
+
+const recoveredNotice = Model.buildNotifications(
+  [{ repo: "owner/repo", runs: [{ status: "completed", conclusion: "failure" }] }],
+  [{ repo: "owner/repo", runs: [{ name: "CI", run_number: 3, status: "completed", conclusion: "success", head_branch: "main" }] }]
+)
+assert.strictEqual(recoveredNotice.length, 1)
+assert.strictEqual(recoveredNotice[0].title, "CI recovered: owner/repo")
+
+assert.deepStrictEqual(Model.buildNotifications([], [{ repo: "owner/repo", runs: [] }]), [])
+assert.deepStrictEqual(Model.buildNotifications(
+  [{ repo: "owner/repo", runs: [{ status: "completed", conclusion: "success" }] }],
+  [{ repo: "owner/repo", runs: [{ status: "completed", conclusion: "success" }] }]
+), [])

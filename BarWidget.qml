@@ -114,7 +114,8 @@ BarWidget {
       "token": setting("token", ""),
       "host": setting("host", ""),
       "interval": setting("interval", 60),
-      "perPage": setting("perPage", 6)
+      "perPage": setting("perPage", 6),
+      "notifyBuilds": setting("notifyBuilds", true) !== false
     })
   }
 

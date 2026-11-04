@@ -236,6 +236,50 @@ function repoState(runs) {
   return STATUS_NEUTRAL
 }
 
+// Desktop notifications for state changes that a person actually wants to
+// know about. The first fetch has no previous state, so it stays quiet.
+function buildNotifications(previousResults, currentResults) {
+  var out = []
+  if (!Array.isArray(previousResults) || !Array.isArray(currentResults) || previousResults.length === 0) return out
+  var previousByRepo = Object.create(null)
+  for (var p = 0; p < previousResults.length; p++) {
+    var old = previousResults[p]
+    if (old && typeof old.repo === "string") previousByRepo[old.repo] = old
+  }
+  for (var i = 0; i < currentResults.length; i++) {
+    var current = currentResults[i]
+    if (!current || typeof current.repo !== "string" || current.error) continue
+    var previous = previousByRepo[current.repo]
+    if (!previous || previous.error) continue
+    var before = repoState(previous.runs)
+    var after = repoState(current.runs)
+    if (before === after) continue
+    var run = Array.isArray(current.runs) && current.runs.length > 0 ? current.runs[0] : null
+    var title = ""
+    var body = ""
+    if (after === STATUS_FAILURE) {
+      title = "CI failed: " + current.repo
+      body = run ? runTitle(run) + (run.head_branch ? " on " + run.head_branch : "") : "A workflow failed"
+    } else if (after === STATUS_ACTION_REQUIRED) {
+      title = "CI needs attention: " + current.repo
+      body = run ? runTitle(run) + (run.head_branch ? " on " + run.head_branch : "") : "A workflow needs review"
+    } else if ((before === STATUS_FAILURE || before === STATUS_ACTION_REQUIRED) && after === STATUS_SUCCESS) {
+      title = "CI recovered: " + current.repo
+      body = run ? runTitle(run) + (run.head_branch ? " on " + run.head_branch : "") : "The latest workflow passed"
+    } else {
+      continue
+    }
+    out.push({
+      repo: current.repo,
+      kind: after,
+      title: title,
+      body: body,
+      url: current.runUrl || (run && run.html_url) || current.repoUrl || ""
+    })
+  }
+  return out
+}
+
 // Widget-wide state across every configured repo. Precedence: running >
 // pending > failure > action-required > any error > all success > neutral >
 // unknown. A red pipeline on any repo therefore raises an alarm even when
@@ -954,6 +998,7 @@ if (typeof module !== "undefined" && module.exports) {
     runName: runName,
     runState: runState,
     repoState: repoState,
+    buildNotifications: buildNotifications,
     deriveOverall: deriveOverall,
     deriveState: deriveState,
     statusIcon: statusIcon,

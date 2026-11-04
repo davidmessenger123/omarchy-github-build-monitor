@@ -26,6 +26,7 @@ Item {
   property string host: ""
   property int interval: 60
   property int perPage: 6
+  property bool notifyBuilds: true
 
   // ---- state --------------------------------------------------------------
 
@@ -104,15 +105,18 @@ Item {
     var nextHost = String(config.host || "")
     var nextInterval = Model.clampInt(config.interval, 15, 3600)
     var nextPerPage = Model.clampInt(config.perPage, 1, 30)
+    var nextNotify = config.notifyBuilds !== false
     var changed = nextRepos !== root.repos || nextMaxRepos !== root.maxRepos ||
       nextToken !== root.token || nextHost !== root.host ||
-      nextInterval !== root.interval || nextPerPage !== root.perPage
+      nextInterval !== root.interval || nextPerPage !== root.perPage ||
+      nextNotify !== root.notifyBuilds
     root.repos = nextRepos
     root.maxRepos = nextMaxRepos
     root.token = nextToken
     root.host = nextHost
     root.interval = nextInterval
     root.perPage = nextPerPage
+    root.notifyBuilds = nextNotify
     root.applyPollInterval()
     if (changed || root.updatedLabel === "") root.queueRefresh()
   }
@@ -267,6 +271,8 @@ Item {
     if (source) source.ingested = true
     watchdog.stop()
     root.fetchBusy = false
+    var notifications = root.notifyBuilds
+      ? Model.buildNotifications(root.repoResults, state.results) : []
     root.repoResults = state.results
     root.overall = state.overall
     root.statusText = state.statusText
@@ -283,6 +289,21 @@ Item {
     root.notesChanged = state.notesChanged
     root.updatedLabel = "Updated " + Model.clockTime(new Date())
     root.applyPollInterval()
+    for (var i = 0; i < notifications.length; i++) root.sendBuildNotification(notifications[i])
+  }
+
+  function sendBuildNotification(notice) {
+    if (!notice || !notice.title) return
+    var command = ["/usr/share/omarchy/bin/omarchy-notification-send",
+      "--app-name", "GitHub Notify Center",
+      "--urgency", notice.kind === Model.STATUS_FAILURE ? "normal" : "low",
+      notice.title, notice.body || ""]
+    if (notice.url !== "") {
+      command.push("--exec")
+      command.push("/usr/bin/xdg-open")
+      command.push(notice.url)
+    }
+    Quickshell.execDetached(command)
   }
 
   function failRun(generation, session, source, exitCode) {
