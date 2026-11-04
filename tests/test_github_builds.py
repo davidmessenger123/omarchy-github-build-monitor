@@ -288,5 +288,16 @@ def _BUILD_key(namespace, path):
     return namespace + "|" + path
 
 
+class QmlContract(unittest.TestCase):
+    def test_service_owns_the_poller(self):
+        root = Path(__file__).resolve().parents[1]
+        service = (root / "Service.qml").read_text(encoding="utf-8")
+        widget = (root / "BarWidget.qml").read_text(encoding="utf-8")
+        self.assertIn("github-builds.py", service)
+        self.assertIn("Model.deriveState", service)
+        self.assertIn("bar.shell.serviceFor(root.moduleName)", widget)
+        self.assertNotIn("Process {", widget)
+        self.assertNotIn("pollTimer", widget)
+
 if __name__ == "__main__":
     unittest.main()
