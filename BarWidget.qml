@@ -398,7 +398,8 @@ BarWidget {
                       }
 
                       Text {
-                        text: modelData.notifCount
+                        text: modelData.notifCount === undefined || modelData.notifCount === null
+                              ? "" : String(modelData.notifCount)
                         color: modelData.notifUrgent ? "#e0af68" : Color.muted
                         font.family: Style.font.family
                         font.pixelSize: Style.font.bodySmall
