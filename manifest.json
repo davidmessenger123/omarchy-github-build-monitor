@@ -3,7 +3,7 @@
   "schemaVersion": 1,
   "id": "davidjm.github-build-monitor",
   "name": "GitHub Notify Center",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "author": "David JM",
   "license": "MIT",
   "repository": "https://github.com/davidmessenger123/omarchy-github-build-monitor",

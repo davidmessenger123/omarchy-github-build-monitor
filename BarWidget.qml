@@ -123,24 +123,16 @@ BarWidget {
   }
 
   onSettingsChanged: root.applySettings()
-  Component.onCompleted: root.applySettings()
-
-  // ---- IPC (refresh / open from hotkeys and omarchy-shell) ----------------
-
-  IpcHandler {
-    target: root.moduleName
-    function refresh(): void { root.refresh() }
-    function open(): void { root.open() }
-    function close(): void { root.close() }
-    function show(): void { root.open() }
-    function hide(): void { root.close() }
-    function toggle(): void { root.togglePanel() }
+  Component.onCompleted: {
+    root.applySettings()
+    if (root.svc) root.svc.registerWidget(root)
   }
+  Component.onDestruction: if (root.svc && typeof root.svc.unregisterWidget === "function") root.svc.unregisterWidget(root)
 
   // Open/close contract the bar uses to route panel hotkeys and summon IPC.
-  // Single source of truth that the KeyboardPanel below mirrors via its
-  // `open` binding.
+  // The service owns the one IPC target; it forwards open/close/toggle here.
   property bool opened: false
+  onOpenedChanged: if (root.svc) root.svc.noteOpened(root, root.opened)
   function open() {
     // Not signed in? The "popup" is the sign-in flow instead.
     if (root.notLoggedIn) { root.loginAction(); return }

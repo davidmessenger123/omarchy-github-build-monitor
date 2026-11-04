@@ -10,6 +10,14 @@ import "Model.js" as Model
 Item {
   id: root
 
+  readonly property string moduleName: "davidjm.github-build-monitor"
+
+  // The bar widget exists once per monitor, but the IPC target must exist
+  // exactly once. The widgets register here, and the service forwards
+  // open/close/toggle to the panel that is actually live.
+  property var widgets: []
+  property var activeWidget: null
+
   // ---- configuration ------------------------------------------------------
 
   property string repos: ""
@@ -43,6 +51,51 @@ Item {
   property int unreadCount: 0
   property int actionableCount: 0
   property bool notesChanged: false
+
+  function registerWidget(widget) {
+    if (!widget || root.widgets.indexOf(widget) !== -1) return
+    var next = root.widgets.slice(0)
+    next.push(widget)
+    root.widgets = next
+    if (!root.activeWidget) root.activeWidget = widget
+  }
+
+  function unregisterWidget(widget) {
+    var next = root.widgets.filter(function(candidate) { return candidate !== widget })
+    root.widgets = next
+    if (root.activeWidget === widget) root.activeWidget = next.length ? next[0] : null
+  }
+
+  function noteOpened(widget, opened) {
+    if (opened) root.activeWidget = widget
+    else if (root.activeWidget === widget) root.activeWidget = null
+  }
+
+  function panelWidget() {
+    if (root.activeWidget && root.widgets.indexOf(root.activeWidget) !== -1) return root.activeWidget
+    return root.widgets.length ? root.widgets[0] : null
+  }
+
+  function openPanel() {
+    var widget = root.panelWidget()
+    if (widget) widget.open()
+  }
+
+  function closePanel() {
+    for (var i = 0; i < root.widgets.length; i++) {
+      if (root.widgets[i] && root.widgets[i].opened) root.widgets[i].close()
+    }
+  }
+
+  function togglePanel() {
+    for (var i = 0; i < root.widgets.length; i++) {
+      if (root.widgets[i] && root.widgets[i].opened) {
+        root.closePanel()
+        return
+      }
+    }
+    root.openPanel()
+  }
 
   function configure(config) {
     var nextRepos = String(config.repos || "")
@@ -307,5 +360,16 @@ Item {
     repeat: true
     triggeredOnStart: false
     onTriggered: root.refresh()
+  }
+
+  IpcHandler {
+    target: root.moduleName
+
+    function refresh(): void { root.refresh() }
+    function open(): void { root.openPanel() }
+    function close(): void { root.closePanel() }
+    function show(): void { root.openPanel() }
+    function hide(): void { root.closePanel() }
+    function toggle(): void { root.togglePanel() }
   }
 }

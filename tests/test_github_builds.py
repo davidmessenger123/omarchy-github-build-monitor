@@ -296,6 +296,9 @@ class QmlContract(unittest.TestCase):
         self.assertIn("github-builds.py", service)
         self.assertIn("Model.deriveState", service)
         self.assertIn("bar.shell.serviceFor(root.moduleName)", widget)
+        self.assertIn("IpcHandler", service)
+        self.assertNotIn("IpcHandler", widget)
+        self.assertIn("registerWidget", widget)
         self.assertNotIn("Process {", widget)
         self.assertNotIn("pollTimer", widget)
 
